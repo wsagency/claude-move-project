@@ -1,7 +1,7 @@
 # claude-move-project
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS-blue.svg)](https://www.apple.com/macos/)
+[![Platform: macOS | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue.svg)](https://github.com/klukacin/claude-move-project#supported-platforms)
 
 A bash utility that moves Claude Code projects while preserving all session history and settings.
 
@@ -79,11 +79,35 @@ This script handles all three, ensuring your session history follows your projec
 
 If any step fails, all changes are automatically rolled back.
 
+## Supported Platforms
+
+| Platform | Status |
+|----------|--------|
+| macOS | ✅ Fully supported |
+| Linux | ✅ Supported |
+| Windows | ⚠️ Via WSL or Git Bash |
+
+### Windows Users
+
+This script requires a bash environment. Windows users can run it using:
+
+**Option 1: WSL2 (Recommended)**
+1. Install WSL2: `wsl --install` in PowerShell (admin)
+2. Open your WSL distro (e.g., Ubuntu)
+3. Navigate to your project: `cd /mnt/c/Users/YourName/projects/myproject`
+4. Run: `./claude-move-project ./my-project /mnt/c/new-location`
+
+**Option 2: Git Bash**
+1. Install [Git for Windows](https://git-scm.com/download/win) (includes Git Bash)
+2. Open Git Bash
+3. Navigate to your project and run the script
+
 ## Disclaimer
 
 **USE AT YOUR OWN RISK**
 
-- This tool has only been tested on **macOS**
+- This tool has been tested on macOS and should work on Linux
+- Windows users must use WSL or Git Bash (see above)
 - Always run with `--dry-run` first to preview changes
 - Consider backing up your `~/.claude/` directory before use
 - The authors are not responsible for any data loss

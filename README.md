@@ -39,14 +39,36 @@ claude-move-project <source> <destination> [options]
 # Preview what would happen (recommended first step)
 claude-move-project ./my-project ~/new-location --dry-run
 
-# Move a project
-claude-move-project ./my-project ~/new-location
+# Move a project (specifying full destination path)
+claude-move-project ./my-project ~/new-location/my-project
+
+# Move into an existing directory (mv-like behavior)
+# If ~/projects/ exists, this moves to ~/projects/my-project
+claude-move-project ./my-project ~/projects
 
 # Move without confirmation prompt
 claude-move-project ./my-project ~/new-location --force
 
 # Move with verbose output
 claude-move-project ./my-project ~/new-location --verbose
+
+# Move a project with special characters in name
+claude-move-project "./project [v1.0]" "./project [v2.0]"
+```
+
+### Destination Behavior
+
+The destination argument works like `mv`:
+
+- If destination **doesn't exist**: Creates it as the new project location
+- If destination **is an existing directory**: Moves the project *into* that directory
+
+```bash
+# Destination doesn't exist - creates ~/new-location as the project
+claude-move-project ./my-app ~/new-location
+
+# ~/projects exists - moves to ~/projects/my-app
+claude-move-project ./my-app ~/projects
 ```
 
 ### Options
@@ -78,6 +100,28 @@ This script handles all three, ensuring your session history follows your projec
 4. Update path references in `history.jsonl`
 
 If any step fails, all changes are automatically rolled back.
+
+## Testing
+
+Run the test suite to verify the script works correctly:
+
+```bash
+# Run all tests
+./test.sh
+
+# Run a specific test
+./test.sh test_basic_move
+```
+
+The test suite covers:
+- Basic move operations
+- Relative path resolution
+- mv-like destination behavior
+- Special characters (brackets, spaces, dots)
+- Symlink handling
+- Dry-run mode
+- Error conditions (missing source, existing dest)
+- Backup/rollback functionality
 
 ## Supported Platforms
 

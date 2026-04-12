@@ -799,6 +799,120 @@ test_case_insensitive_path() {
 }
 
 # ============================================================================
+# CLAUDE_CONFIG_DIR TESTS
+# ============================================================================
+
+test_claude_config_dir_move() {
+    # Set up a custom config dir (not under $HOME/.claude)
+    local custom_config="$TEST_DIR/custom-config"
+    mkdir -p "$custom_config/projects"
+    touch "$custom_config/history.jsonl"
+
+    # Remove the default $HOME/.claude so we can verify it's not used
+    rm -rf "$MOCK_CLAUDE_DIR"
+
+    # Create source project and its session data in custom config dir
+    local source_abs="$TEST_DIR/source-project"
+    mkdir -p "$source_abs/.claude"
+    echo "# Test" > "$source_abs/README.md"
+
+    local encoded="${source_abs//\//-}"
+    mkdir -p "$custom_config/projects/$encoded"
+    echo "{\"type\":\"session\",\"cwd\":\"$source_abs\"}" > "$custom_config/projects/$encoded/session1.jsonl"
+    echo "{\"project\":\"$source_abs\",\"session\":\"session1\"}" >> "$custom_config/history.jsonl"
+
+    local dest_abs="$TEST_DIR/dest-project"
+
+    # Run with CLAUDE_CONFIG_DIR
+    CLAUDE_CONFIG_DIR="$custom_config" "$SCRIPT" "$source_abs" "$dest_abs" -f
+
+    # Verify project moved
+    assert_not_exists "$source_abs" "Source should be gone" || return 1
+    assert_dir_exists "$dest_abs" "Destination should exist" || return 1
+
+    # Verify session folder renamed in custom config dir
+    local new_encoded="${dest_abs//\//-}"
+    assert_not_exists "$custom_config/projects/$encoded" "Old session folder should be gone" || return 1
+    assert_dir_exists "$custom_config/projects/$new_encoded" "New session folder should exist in custom config" || return 1
+
+    # Verify history.jsonl updated in custom config dir
+    assert_not_contains "$custom_config/history.jsonl" "$source_abs" "Old path should not be in history" || return 1
+    assert_contains "$custom_config/history.jsonl" "$dest_abs" "New path should be in history" || return 1
+
+    # Verify cwd rewritten inside session JSONL
+    assert_not_contains "$custom_config/projects/$new_encoded/session1.jsonl" "$source_abs" "Old cwd should not be in session file" || return 1
+    assert_contains "$custom_config/projects/$new_encoded/session1.jsonl" "$dest_abs" "New cwd should be in session file" || return 1
+
+    # Verify default $HOME/.claude was NOT created
+    assert_not_exists "$MOCK_CLAUDE_DIR" "Default ~/.claude should not be created" || return 1
+}
+
+test_claude_config_dir_list() {
+    # Set up a custom config dir
+    local custom_config="$TEST_DIR/custom-config"
+    mkdir -p "$custom_config/projects"
+    touch "$custom_config/history.jsonl"
+
+    # Remove the default $HOME/.claude
+    rm -rf "$MOCK_CLAUDE_DIR"
+
+    # Create a project entry in custom config
+    local project_abs="$TEST_DIR/listed-project"
+    mkdir -p "$project_abs"
+    echo "{\"project\":\"$project_abs\",\"session\":\"s1\"}" >> "$custom_config/history.jsonl"
+
+    local output
+    output=$(CLAUDE_CONFIG_DIR="$custom_config" "$SCRIPT" --list 2>&1)
+
+    if echo "$output" | grep -q "listed-project"; then
+        return 0
+    else
+        echo "  Expected project in --list output"
+        echo "  Output: $output"
+        return 1
+    fi
+}
+
+test_claude_config_dir_fix() {
+    # Set up a custom config dir
+    local custom_config="$TEST_DIR/custom-config"
+    mkdir -p "$custom_config/projects"
+    touch "$custom_config/history.jsonl"
+
+    # Remove the default $HOME/.claude
+    rm -rf "$MOCK_CLAUDE_DIR"
+
+    # Create project, simulate manual mv
+    local old_abs="$TEST_DIR/fix-old"
+    mkdir -p "$old_abs/.claude"
+    echo "# Test" > "$old_abs/README.md"
+
+    local old_encoded="${old_abs//\//-}"
+    mkdir -p "$custom_config/projects/$old_encoded"
+    echo "{\"type\":\"session\",\"cwd\":\"$old_abs\"}" > "$custom_config/projects/$old_encoded/session1.jsonl"
+    echo "{\"project\":\"$old_abs\",\"session\":\"s1\"}" >> "$custom_config/history.jsonl"
+
+    # Manual mv
+    mv "$old_abs" "$TEST_DIR/fix-new"
+    local new_abs="$TEST_DIR/fix-new"
+
+    # Run fix with CLAUDE_CONFIG_DIR
+    CLAUDE_CONFIG_DIR="$custom_config" "$SCRIPT" --fix --from "$old_abs" --to "$new_abs" -f
+
+    # Verify session folder renamed
+    local new_encoded="${new_abs//\//-}"
+    assert_not_exists "$custom_config/projects/$old_encoded" "Old session folder should be gone" || return 1
+    assert_dir_exists "$custom_config/projects/$new_encoded" "New session folder should exist" || return 1
+
+    # Verify history updated
+    assert_contains "$custom_config/history.jsonl" "$new_abs" "History should have new path" || return 1
+    assert_not_contains "$custom_config/history.jsonl" "$old_abs" "History should not have old path" || return 1
+
+    # Verify cwd rewritten in session file
+    assert_contains "$custom_config/projects/$new_encoded/session1.jsonl" "$new_abs" "Session file should have new cwd" || return 1
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -854,6 +968,10 @@ main() {
         test_prune_dry_run
         # case-sensitivity tests
         test_case_insensitive_path
+        # CLAUDE_CONFIG_DIR tests
+        test_claude_config_dir_move
+        test_claude_config_dir_list
+        test_claude_config_dir_fix
     )
 
     # Run specific test or all tests

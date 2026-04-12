@@ -203,6 +203,31 @@ escape_for_sed() {
     printf '%s\n' "$str"
 }
 
+# Rewrite old paths to new paths inside session JSONL files
+# Usage: rewrite_session_paths <session_folder> <old_path> <new_path>
+rewrite_session_paths() {
+    local session_folder="$1"
+    local old_path="$2"
+    local new_path="$3"
+
+    if [[ ! -d "$session_folder" ]]; then
+        return 0
+    fi
+
+    local old_escaped new_escaped
+    old_escaped=$(escape_for_sed "$old_path")
+    new_escaped=$(escape_for_sed "$new_path")
+
+    find "$session_folder" -name "*.jsonl" -type f | while read -r jsonl_file; do
+        log_verbose "Updating session file: $jsonl_file"
+        if [[ "$(uname)" == "Darwin" ]]; then
+            sed -i '' "s|$old_escaped|$new_escaped|g" "$jsonl_file"
+        else
+            sed -i "s|$old_escaped|$new_escaped|g" "$jsonl_file"
+        fi
+    done
+}
+
 # Verbose logging (only when -v flag is set)
 log_verbose() {
     if [[ "$VERBOSE" == true ]]; then
@@ -1068,7 +1093,14 @@ execute_move() {
         log_success "Renamed history folder"
     fi
 
-    # Step 4: Update history.jsonl
+    # Step 4: Rewrite paths inside session JSONL files
+    if [[ -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
+        log_info "Rewriting paths in session files..."
+        rewrite_session_paths "$PROJECTS_DIR/$NEW_ENCODED" "$SOURCE_ABS" "$DEST_ABS"
+        log_success "Rewrote paths in session files"
+    fi
+
+    # Step 5: Update history.jsonl
     if [[ -f "$HISTORY_FILE" ]]; then
         log_info "Updating history index..."
         # Escape special characters for sed (handles [], *, ., ^, $, etc.)
@@ -1271,19 +1303,7 @@ execute_unpack() {
         # Rewrite paths in session JSONL files
         if [[ -n "$original_path" && "$original_path" != "$DEST_ABS" ]]; then
             log_info "Rewriting paths in session files..."
-            local old_escaped new_escaped
-            old_escaped=$(escape_for_sed "$original_path")
-            new_escaped=$(escape_for_sed "$DEST_ABS")
-
-            # Find and update all JSONL files
-            find "$PROJECTS_DIR/$NEW_ENCODED" -name "*.jsonl" -type f | while read -r jsonl_file; do
-                log_verbose "Updating: $jsonl_file"
-                if [[ "$(uname)" == "Darwin" ]]; then
-                    sed -i '' "s|$old_escaped|$new_escaped|g" "$jsonl_file"
-                else
-                    sed -i "s|$old_escaped|$new_escaped|g" "$jsonl_file"
-                fi
-            done
+            rewrite_session_paths "$PROJECTS_DIR/$NEW_ENCODED" "$original_path" "$DEST_ABS"
             log_success "Rewrote paths in session files"
         fi
         log_success "Copied session folder"
@@ -1880,6 +1900,13 @@ execute_fix_explicit() {
             mv "$PROJECTS_DIR/$old_encoded" "$PROJECTS_DIR/$new_encoded"
             log_success "Renamed session folder"
         fi
+    fi
+
+    # Rewrite paths inside session JSONL files
+    if [[ -d "$PROJECTS_DIR/$new_encoded" ]]; then
+        log_info "Rewriting paths in session files..."
+        rewrite_session_paths "$PROJECTS_DIR/$new_encoded" "$old_path" "$new_path"
+        log_success "Rewrote paths in session files"
     fi
 
     # Update history.jsonl

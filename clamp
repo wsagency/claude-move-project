@@ -13,7 +13,7 @@
 set -euo pipefail
 
 VERSION="1.4.1"
-CLAUDE_DIR="$HOME/.claude"
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 PROJECTS_DIR="$CLAUDE_DIR/projects"
 HISTORY_FILE="$CLAUDE_DIR/history.jsonl"
 

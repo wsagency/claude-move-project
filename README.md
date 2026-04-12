@@ -183,6 +183,12 @@ Claude Code stores project data in three locations:
 
 This script handles all three, ensuring your session history follows your project.
 
+If you use a custom config directory via `CLAUDE_CONFIG_DIR`, clamp respects it automatically:
+
+```bash
+CLAUDE_CONFIG_DIR=~/custom-claude-config clamp ./my-project ~/new-location
+```
+
 ### 🔄 Migration Sequence
 
 1. Backup `history.jsonl`

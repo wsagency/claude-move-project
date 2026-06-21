@@ -51,6 +51,7 @@ JSON_OUTPUT=false
 HERE_MODE=false
 FIX_FROM=""
 FIX_TO=""
+PATH_ENCODING="posix"  # posix | windows; set via --encoding
 
 log_info() {
     echo -e "${BLUE}[INFO]${NC} $1"
@@ -111,6 +112,7 @@ Options:
   --json              Output in JSON format (for --list)
   --from <path>       Original path (for --fix)
   --to <path>         New path (for --fix)
+  --encoding <mode>   Path-encoding scheme: posix (default) or windows
   -v, --verbose       Show detailed output
   -h, --help          Show this help message
   --version           Show version
@@ -147,22 +149,51 @@ What gets migrated:
 EOF
 }
 
-# Convert path to Claude's encoded format: /path/to/dir -> -path-to-dir
+# Convert path to Claude's encoded format.
 encode_path() {
     local path="$1"
+    if [[ "$PATH_ENCODING" == "windows" ]]; then
+        # Normalize Git Bash mounted-drive form (/d/foo) to native (D:/foo)
+        if [[ "$path" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            local drive
+            drive=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
+            path="${drive}:/${BASH_REMATCH[2]}"
+        fi
+        # Claude on Windows encodes : and \ to -, then / to -
+        path="${path//:/-}"
+        path="${path//\\/-}"
+    fi
     echo "${path//\//-}"
 }
 
-# Get absolute path (works on macOS and Linux)
+# Convert a filesystem-form path to history.jsonl form.
+to_history_form() {
+    local path="$1"
+    if [[ "$PATH_ENCODING" == "windows" ]]; then
+        local bs='\\\\'
+        path="${path//\//$bs}"
+    fi
+    echo "$path"
+}
+
+# Inverse of to_history_form.
+from_history_form() {
+    local path="$1"
+    if [[ "$PATH_ENCODING" == "windows" ]]; then
+        path="${path//\\\\//}"
+    fi
+    echo "$path"
+}
+
+# Get absolute path (macOS, Linux, MSYS).
 # Recursively resolves paths even when destination doesn't exist
 get_absolute_path() {
     local path="$1"
+    local resolved
     if [[ -d "$path" ]]; then
-        (cd "$path" && pwd)
+        resolved=$(cd "$path" && pwd)
     elif [[ -f "$path" ]]; then
-        local dir
-        dir=$(dirname "$path")
-        echo "$(cd "$dir" && pwd)/$(basename "$path")"
+        resolved="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
     else
         # Path doesn't exist yet, resolve via parent
         local parent
@@ -170,20 +201,32 @@ get_absolute_path() {
         local base
         base=$(basename "$path")
         if [[ -d "$parent" ]]; then
-            echo "$(cd "$parent" && pwd)/$base"
+            resolved="$(cd "$parent" && pwd)/$base"
         else
             # Try to resolve parent recursively
             local resolved_parent
             resolved_parent=$(get_absolute_path "$parent")
-            echo "$resolved_parent/$base"
+            resolved="$resolved_parent/$base"
         fi
     fi
+    if [[ "$PATH_ENCODING" == "windows" ]]; then
+        # Rewrite forward-slash paths to match format in history.jsonl.
+        if [[ "$resolved" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+            local drive
+            drive=$(echo "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')
+            resolved="${drive}:/${BASH_REMATCH[2]}"
+        fi
+    fi
+    echo "$resolved"
 }
 
-# Validate that a path is absolute (starts with /)
+# Validate that a path is absolute
+#   POSIX:   starts with /
+#   Windows: starts with <letter>:/ or <letter>:\
 is_absolute_path() {
     local path="$1"
-    [[ "$path" == /* ]]
+    [[ "$path" == /* ]] && return 0
+    [[ "$path" =~ ^[a-zA-Z]:[/\\] ]]
 }
 
 # Escape special characters for sed regex patterns
@@ -208,6 +251,51 @@ log_verbose() {
     if [[ "$VERBOSE" == true ]]; then
         echo -e "${BLUE}[VERBOSE]${NC} $1"
     fi
+}
+
+# sed -i wrapper that handles the macOS vs Linux argument difference.
+_sed_inplace() {
+    if [[ "$(uname)" == "Darwin" ]]; then
+        sed -i '' "$@"
+    else
+        sed -i "$@"
+    fi
+}
+
+# Wrapper around `read -p` that always reads from the controlling terminal.
+# (bare `read -p` silently consumes stdin ignoring redirection.)
+prompt_read() {
+    local prompt="$1"
+    shift
+    read -p "$prompt" "$@" < /dev/tty
+}
+
+# Rewrite "project":"<old_fs>" -> "project":"<new_fs>" in a single
+# history-format file (history.jsonl or an extracted-entries staging file).
+rewrite_project_key_in_history_jsonl() {
+    local file="$1" old_fs="$2" new_fs="$3"
+    [[ -f "$file" ]] || return 0
+    [[ "$old_fs" == "$new_fs" ]] && return 0
+    local old_escaped new_escaped
+    old_escaped=$(escape_for_sed "$(to_history_form "$old_fs")")
+    new_escaped=$(escape_for_sed "$(to_history_form "$new_fs")")
+    _sed_inplace "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$file"
+}
+
+# Rewrite every occurrence of <old_fs> -> <new_fs> in every *.jsonl file under <dir>.
+# Used for per-session transcript JSONLs, where the project path can
+# appear in multiple fields (cwd, file refs, etc).
+rewrite_paths_in_session_jsonls() {
+    local dir="$1" old_fs="$2" new_fs="$3"
+    [[ -d "$dir" ]] || return 0
+    [[ "$old_fs" == "$new_fs" ]] && return 0
+    local old_escaped new_escaped
+    old_escaped=$(escape_for_sed "$(to_history_form "$old_fs")")
+    new_escaped=$(escape_for_sed "$(to_history_form "$new_fs")")
+    find "$dir" -name "*.jsonl" -type f | while read -r jsonl_file; do
+        log_verbose "Rewriting paths in: $jsonl_file"
+        _sed_inplace "s|$old_escaped|$new_escaped|g" "$jsonl_file"
+    done
 }
 
 # Rollback on failure
@@ -315,6 +403,23 @@ parse_args() {
                     exit 1
                 fi
                 FIX_TO="$1"
+                shift
+                ;;
+            --encoding)
+                shift
+                if [[ $# -eq 0 ]]; then
+                    log_error "--encoding requires an argument (posix|windows)"
+                    exit 1
+                fi
+                case "$1" in
+                    posix|windows)
+                        PATH_ENCODING="$1"
+                        ;;
+                    *)
+                        log_error "--encoding must be 'posix' or 'windows' (got: $1)"
+                        exit 1
+                        ;;
+                esac
                 shift
                 ;;
             -v|--verbose)
@@ -532,19 +637,19 @@ validate_source_project() {
     SOURCE_ABS=$(get_absolute_path "$SOURCE")
     log_verbose "Resolved source path: $SOURCE_ABS"
 
-    # On case-insensitive filesystems (macOS APFS), `cd "$path" && pwd` preserves
-    # the casing of the input, not the canonical filesystem casing. If the user's
-    # shell resolves a different case than what Claude Code stored in history.jsonl,
-    # the sed replacement will silently match nothing. Fix by looking up the
-    # canonical path string from history.jsonl via case-insensitive match.
-    if [[ -f "$HISTORY_FILE" ]] && ! grep -qF -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE"; then
+    # On case-insensitive filesystems (macOS APFS, Windows NTFS),
+    # `cd && pwd` preserves the casing of the input, not the canonical casing.
+    # Look up the canonical string in history.jsonl (case-insensitive match).
+    if [[ -f "$HISTORY_FILE" ]] && ! grep -qF -- "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE"; then
         local ci_match
-        ci_match=$(grep -iF -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" | head -1 | sed -n 's/.*"project":"\([^"]*\)".*/\1/p') || true
+        ci_match=$(grep -iF -- "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" | head -1 | sed -n 's/.*"project":"\([^"]*\)".*/\1/p') || true
         if [[ -n "$ci_match" ]]; then
+            local ci_match_fs
+            ci_match_fs=$(from_history_form "$ci_match")
             log_warn "Path case mismatch detected (case-insensitive filesystem)"
             log_verbose "  Shell resolved: $SOURCE_ABS"
-            log_verbose "  History record: $ci_match"
-            SOURCE_ABS="$ci_match"
+            log_verbose "  History record: $ci_match_fs"
+            SOURCE_ABS="$ci_match_fs"
         fi
     fi
 
@@ -828,7 +933,7 @@ show_preview_move() {
     # Count history.jsonl entries
     if [[ -f "$HISTORY_FILE" ]]; then
         local entry_count
-        entry_count=$(grep -c -F -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        entry_count=$(grep -c -F -- "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
         echo "History Index Updates:"
         echo "  File: $HISTORY_FILE"
         echo "  Entries to update: $entry_count reference(s)"
@@ -877,7 +982,7 @@ show_preview_remove() {
     # Count history.jsonl entries to remove
     if [[ -f "$HISTORY_FILE" ]]; then
         local entry_count
-        entry_count=$(grep -c -F -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        entry_count=$(grep -c -F -- "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
         echo "History Index Entries to REMOVE: $entry_count"
     fi
     echo ""
@@ -919,7 +1024,7 @@ show_preview_pack() {
     # Count history.jsonl entries
     if [[ -f "$HISTORY_FILE" ]]; then
         local entry_count
-        entry_count=$(grep -c -F -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        entry_count=$(grep -c -F -- "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
         echo "History Index Entries: $entry_count"
     fi
     echo ""
@@ -1034,7 +1139,7 @@ confirm() {
             ;;
     esac
 
-    read -p "$prompt" -n 1 -r
+    prompt_read "$prompt" -n 1 -r
     echo ""
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
         log_info "$action_name cancelled"
@@ -1071,21 +1176,15 @@ execute_move() {
     # Step 4: Update history.jsonl
     if [[ -f "$HISTORY_FILE" ]]; then
         log_info "Updating history index..."
-        # Escape special characters for sed (handles [], *, ., ^, $, etc.)
-        local old_escaped
-        local new_escaped
-        old_escaped=$(escape_for_sed "$SOURCE_ABS")
-        new_escaped=$(escape_for_sed "$DEST_ABS")
-        log_verbose "Escaped source for sed: $old_escaped"
-        log_verbose "Escaped destination for sed: $new_escaped"
-
-        # macOS sed requires '' after -i, Linux doesn't
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
-        else
-            sed -i "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
-        fi
+        rewrite_project_key_in_history_jsonl "$HISTORY_FILE" "$SOURCE_ABS" "$DEST_ABS"
         log_success "Updated history index"
+    fi
+
+    # Step 5: Rewrite path references inside per-session JSONL files.
+    if [[ -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
+        log_info "Rewriting paths in session transcripts..."
+        rewrite_paths_in_session_jsonls "$PROJECTS_DIR/$NEW_ENCODED" "$SOURCE_ABS" "$DEST_ABS"
+        log_success "Rewrote paths in session transcripts"
     fi
 
     echo ""
@@ -1110,10 +1209,8 @@ execute_remove() {
     # Step 2: Remove entries from history.jsonl
     if [[ -f "$HISTORY_FILE" ]]; then
         log_info "Removing entries from history index..."
-        local old_escaped
-        old_escaped=$(escape_for_sed "$SOURCE_ABS")
-        # Create temp file without matching lines
-        grep -v -F "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" > "$HISTORY_FILE.tmp" || true
+        # Filter via fixed-string grep (no sed-escape needed).
+        grep -v -F "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" > "$HISTORY_FILE.tmp" || true
         mv "$HISTORY_FILE.tmp" "$HISTORY_FILE"
         HISTORY_MODIFIED=true
         log_success "Removed history index entries"
@@ -1165,7 +1262,7 @@ execute_pack() {
     # Step 3: Extract history entries
     log_info "Extracting history entries..."
     if [[ -f "$HISTORY_FILE" ]]; then
-        grep -F "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" > "$TEMP_DIR/history-entries.jsonl" || true
+        grep -F "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" > "$TEMP_DIR/history-entries.jsonl" || true
     else
         touch "$TEMP_DIR/history-entries.jsonl"
     fi
@@ -1268,22 +1365,10 @@ execute_unpack() {
         cp -R "$TEMP_DIR/sessions/." "$PROJECTS_DIR/$NEW_ENCODED/"
         HISTORY_FOLDER_MOVED=true
 
-        # Rewrite paths in session JSONL files
+        # Rewrite paths in session JSONL files (same format as history.jsonl).
         if [[ -n "$original_path" && "$original_path" != "$DEST_ABS" ]]; then
             log_info "Rewriting paths in session files..."
-            local old_escaped new_escaped
-            old_escaped=$(escape_for_sed "$original_path")
-            new_escaped=$(escape_for_sed "$DEST_ABS")
-
-            # Find and update all JSONL files
-            find "$PROJECTS_DIR/$NEW_ENCODED" -name "*.jsonl" -type f | while read -r jsonl_file; do
-                log_verbose "Updating: $jsonl_file"
-                if [[ "$(uname)" == "Darwin" ]]; then
-                    sed -i '' "s|$old_escaped|$new_escaped|g" "$jsonl_file"
-                else
-                    sed -i "s|$old_escaped|$new_escaped|g" "$jsonl_file"
-                fi
-            done
+            rewrite_paths_in_session_jsonls "$PROJECTS_DIR/$NEW_ENCODED" "$original_path" "$DEST_ABS"
             log_success "Rewrote paths in session files"
         fi
         log_success "Copied session folder"
@@ -1293,17 +1378,10 @@ execute_unpack() {
     if [[ -f "$TEMP_DIR/history-entries.jsonl" ]] && [[ -s "$TEMP_DIR/history-entries.jsonl" ]]; then
         log_info "Appending history entries..."
 
-        # Rewrite paths in history entries before appending
+        # Rewrite paths in history entries before appending.
         if [[ -n "$original_path" && "$original_path" != "$DEST_ABS" ]]; then
-            local old_escaped new_escaped
-            old_escaped=$(escape_for_sed "$original_path")
-            new_escaped=$(escape_for_sed "$DEST_ABS")
-
-            if [[ "$(uname)" == "Darwin" ]]; then
-                sed -i '' "s|$old_escaped|$new_escaped|g" "$TEMP_DIR/history-entries.jsonl"
-            else
-                sed -i "s|$old_escaped|$new_escaped|g" "$TEMP_DIR/history-entries.jsonl"
-            fi
+            rewrite_project_key_in_history_jsonl \
+                "$TEMP_DIR/history-entries.jsonl" "$original_path" "$DEST_ABS"
         fi
 
         # Append to history file
@@ -1363,12 +1441,16 @@ _list_has() {
     echo "$list" | grep -qFx -- "$val" 2>/dev/null
 }
 
-# Extract unique project paths from history.jsonl
+# Extract unique project paths from history.jsonl, normalized to filesystem form.
 _extract_history_projects() {
-    if [[ -f "$HISTORY_FILE" ]]; then
-        grep -o '"project":"[^"]*"' "$HISTORY_FILE" 2>/dev/null | \
-            sed 's/"project":"//;s/"$//' | sort -u || true
+    if [[ ! -f "$HISTORY_FILE" ]]; then
+        return 0
     fi
+    grep -o '"project":"[^"]*"' "$HISTORY_FILE" 2>/dev/null | \
+        sed 's/"project":"//;s/"$//' | \
+        while IFS= read -r p; do
+            from_history_form "$p"
+        done | sort -u || true
 }
 
 # Execute list operation
@@ -1396,7 +1478,7 @@ execute_list() {
     if [[ -n "$seen" ]]; then
         while IFS= read -r kp; do
             [[ -z "$kp" ]] && continue
-            known_encoded="${known_encoded}${known_encoded:+$'\n'}${kp//\//-}"
+            known_encoded="${known_encoded}${known_encoded:+$'\n'}$(encode_path "$kp")"
         done <<< "$seen"
     fi
 
@@ -1423,7 +1505,7 @@ execute_list() {
 
     local project_count=0
     while IFS= read -r _p; do
-        [[ -n "$_p" ]] && ((project_count++))
+        [[ -n "$_p" ]] && { ((project_count++)) || true; }
     done <<< "$projects"
 
     if [[ "$JSON_OUTPUT" == true ]]; then
@@ -1432,7 +1514,8 @@ execute_list() {
         local first=true
         while IFS= read -r proj_path; do
             [[ -z "$proj_path" ]] && continue
-            local encoded="${proj_path//\//-}"
+            local encoded
+            encoded=$(encode_path "$proj_path")
             local sessions
             sessions=$(count_sessions "$encoded")
             local size="0"
@@ -1476,7 +1559,8 @@ execute_list() {
 
         while IFS= read -r proj_path; do
             [[ -z "$proj_path" ]] && continue
-            local encoded="${proj_path//\//-}"
+            local encoded
+            encoded=$(encode_path "$proj_path")
             local sessions
             sessions=$(count_sessions "$encoded")
             local status_icon status_label
@@ -1556,7 +1640,7 @@ execute_verify() {
     if [[ -n "$unique_projects" ]]; then
         while IFS= read -r pp; do
             [[ -z "$pp" ]] && continue
-            known_encoded="${known_encoded}${known_encoded:+$'\n'}${pp//\//-}"
+            known_encoded="${known_encoded}${known_encoded:+$'\n'}$(encode_path "$pp")"
         done <<< "$unique_projects"
     fi
 
@@ -1603,7 +1687,8 @@ execute_verify() {
         if [[ -n "$unique_hist" ]]; then
             while IFS= read -r proj_path; do
                 [[ -z "$proj_path" ]] && continue
-                local encoded="${proj_path//\//-}"
+                local encoded
+                encoded=$(encode_path "$proj_path")
                 if [[ -d "$proj_path" && ! -d "$PROJECTS_DIR/$encoded" ]]; then
                     if [[ $missing_sessions -eq 0 ]]; then
                         echo -e "  ${YELLOW}Projects with history entries but no session folder:${NC}"
@@ -1645,7 +1730,7 @@ execute_prune() {
     if [[ -n "$unique_projects" ]]; then
         while IFS= read -r pp; do
             [[ -z "$pp" ]] && continue
-            known_encoded="${known_encoded}${known_encoded:+$'\n'}${pp//\//-}"
+            known_encoded="${known_encoded}${known_encoded:+$'\n'}$(encode_path "$pp")"
         done <<< "$unique_projects"
     fi
 
@@ -1692,7 +1777,7 @@ execute_prune() {
 
     # Confirm
     if [[ "$FORCE" != true ]]; then
-        read -p "Remove $orphaned_count orphaned session folder(s)? [y/N] " -n 1 -r
+        prompt_read "Remove $orphaned_count orphaned session folder(s)? [y/N] " -n 1 -r
         echo ""
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             log_info "Prune cancelled"
@@ -1721,7 +1806,8 @@ execute_prune() {
 
 # Execute info operation
 execute_info() {
-    local encoded="${SOURCE_ABS//\//-}"
+    local encoded
+    encoded=$(encode_path "$SOURCE_ABS")
 
     echo ""
     echo "Claude Code Project Info"
@@ -1784,7 +1870,7 @@ execute_info() {
     # History entries
     if [[ -f "$HISTORY_FILE" ]]; then
         local entry_count
-        entry_count=$(grep -c -F -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        entry_count=$(grep -c -F -- "\"project\":\"$(to_history_form "$SOURCE_ABS")\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
         echo "History entries: $entry_count"
     else
         echo "History entries: (history file not found)"
@@ -1814,8 +1900,10 @@ execute_fix() {
 execute_fix_explicit() {
     local old_path="$1"
     local new_path="$2"
-    local old_encoded="${old_path//\//-}"
-    local new_encoded="${new_path//\//-}"
+    local old_encoded
+    local new_encoded
+    old_encoded=$(encode_path "$old_path")
+    new_encoded=$(encode_path "$new_path")
 
     log_info "Fixing: $old_path → $new_path"
     echo ""
@@ -1836,7 +1924,7 @@ execute_fix_explicit() {
     # Check history entries
     local entry_count=0
     if [[ -f "$HISTORY_FILE" ]]; then
-        entry_count=$(grep -c -F -- "\"project\":\"$old_path\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        entry_count=$(grep -c -F -- "\"project\":\"$(to_history_form "$old_path")\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
         if [[ $entry_count -gt 0 ]]; then
             echo "History entries to update: $entry_count"
             changes=1
@@ -1857,7 +1945,7 @@ execute_fix_explicit() {
 
     # Confirm
     if [[ "$FORCE" != true ]]; then
-        read -p "Apply fix? [y/N] " -n 1 -r
+        prompt_read "Apply fix? [y/N] " -n 1 -r
         echo ""
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
             log_info "Fix cancelled"
@@ -1884,16 +1972,15 @@ execute_fix_explicit() {
 
     # Update history.jsonl
     if [[ -f "$HISTORY_FILE" && $entry_count -gt 0 ]]; then
-        local old_escaped new_escaped
-        old_escaped=$(escape_for_sed "$old_path")
-        new_escaped=$(escape_for_sed "$new_path")
-
-        if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
-        else
-            sed -i "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
-        fi
+        rewrite_project_key_in_history_jsonl "$HISTORY_FILE" "$old_path" "$new_path"
         log_success "Updated $entry_count history entries"
+    fi
+
+    # Rewrite path references inside per-session JSONL files 
+    if [[ -d "$PROJECTS_DIR/$new_encoded" ]]; then
+        log_info "Rewriting paths in session transcripts..."
+        rewrite_paths_in_session_jsonls "$PROJECTS_DIR/$new_encoded" "$old_path" "$new_path"
+        log_success "Rewrote paths in session transcripts"
     fi
 
     echo ""
@@ -1961,7 +2048,7 @@ execute_fix_detect_old() {
             log_info "Using first match (--force)"
             execute_fix_explicit "$first_candidate" "$new_path"
         else
-            read -p "Select which to fix (1-$candidate_count): " -r
+            prompt_read "Select which to fix (1-$candidate_count): " -r
             local idx=$((REPLY))
             local selected
             selected=$(echo "$candidates" | sed -n "${idx}p")
@@ -2006,7 +2093,7 @@ execute_fix_auto() {
     if [[ -n "$unique_projects" ]]; then
         while IFS= read -r kp; do
             [[ -z "$kp" ]] && continue
-            known_encoded="${known_encoded}${known_encoded:+$'\n'}${kp//\//-}"
+            known_encoded="${known_encoded}${known_encoded:+$'\n'}$(encode_path "$kp")"
         done <<< "$unique_projects"
     fi
 
@@ -2056,7 +2143,7 @@ execute_fix_auto() {
                 while IFS= read -r match; do
                     [[ -d "$match" ]] || continue
                     local match_abs
-                    match_abs=$(cd "$match" && pwd)
+                    match_abs=$(get_absolute_path "$match")
                     # Don't match the broken path itself, deduplicate
                     if [[ "$match_abs" != "$bp" ]] && ! _list_has "$match_seen" "$match_abs"; then
                         matches="${matches}${matches:+$'\n'}${match_abs}"
@@ -2084,7 +2171,7 @@ execute_fix_auto() {
                 execute_fix_explicit "$bp" "$single_match"
                 ((fixed++)) || true
             else
-                read -p "    Fix $bp → $single_match? [y/N] " -n 1 -r
+                prompt_read "    Fix $bp → $single_match? [y/N] " -n 1 -r
                 echo ""
                 if [[ $REPLY =~ ^[Yy]$ ]]; then
                     execute_fix_explicit "$bp" "$single_match"
@@ -2100,7 +2187,7 @@ execute_fix_auto() {
                 ((i++)) || true
             done <<< "$matches"
             if [[ "$DRY_RUN" != true && "$FORCE" != true ]]; then
-                read -p "    Select match (1-$match_count, or Enter to skip): " -r
+                prompt_read "    Select match (1-$match_count, or Enter to skip): " -r
                 if [[ -n "$REPLY" ]]; then
                     local selected
                     selected=$(echo "$matches" | sed -n "${REPLY}p")
@@ -2159,10 +2246,19 @@ main() {
         exit 0
     fi
     parse_args "$@"
+    if [[ "$PATH_ENCODING" == "windows" ]]; then
+        # Normalize CLAUDE_DIR etc for consistent display.
+        CLAUDE_DIR=$(get_absolute_path "$CLAUDE_DIR")
+        PROJECTS_DIR="$CLAUDE_DIR/projects"
+        HISTORY_FILE="$CLAUDE_DIR/history.jsonl"
+    fi
     validate
     show_preview
     confirm
     execute
 }
 
-main "$@"
+# Allow sourcing file without running main, for testing flexibility
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

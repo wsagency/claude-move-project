@@ -22,6 +22,12 @@ MOCK_CLAUDE_DIR=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPT="$SCRIPT_DIR/clamp"
 
+# Real $HOME captured at script load (each test overrides HOME to its sandbox).
+ORIGINAL_HOME="$HOME"
+
+# Source clamp so tests can call its helpers; sourceability guard skips main().
+source "$SCRIPT"
+
 # Test counters
 TESTS_PASSED=0
 TESTS_FAILED=0
@@ -48,7 +54,9 @@ log_skip() {
 
 # Setup test environment
 setup_test_env() {
-    TEST_DIR=$(mktemp -d)
+    # Sandbox under $HOME, not /tmp.
+    # (MSYS auto-aliases /tmp cd-paths to forward-slash format).
+    TEST_DIR=$(TMPDIR="$ORIGINAL_HOME" mktemp -d -t clamp-test.XXXXXX)
     MOCK_CLAUDE_DIR="$TEST_DIR/.claude"
     mkdir -p "$MOCK_CLAUDE_DIR/projects"
     touch "$MOCK_CLAUDE_DIR/history.jsonl"
@@ -86,6 +94,33 @@ create_mock_project() {
 
     # Add entry to history.jsonl
     echo "{\"project\":\"$abs_path\",\"session\":\"session1\"}" >> "$MOCK_CLAUDE_DIR/history.jsonl"
+}
+
+# create_mock_project, adjusted for Windows
+# (embeds a path reference in session JSONL for rewrite testing)
+create_mock_windows_project() {
+    local project_path="$1"
+
+    mkdir -p "$project_path"
+    mkdir -p "$project_path/.claude"
+    echo "# Test Project" > "$project_path/README.md"
+    echo "test content" > "$project_path/.claude/settings.json"
+
+    local saved_encoding="$PATH_ENCODING"
+    PATH_ENCODING="windows"
+    local win_abs win_encoded win_hist
+    win_abs=$(get_absolute_path "$project_path")
+    win_encoded=$(encode_path "$win_abs")
+    win_hist=$(to_history_form "$win_abs")
+    PATH_ENCODING="$saved_encoding"
+
+    mkdir -p "$MOCK_CLAUDE_DIR/projects/$win_encoded"
+    echo "{\"type\":\"session\",\"cwd\":\"$win_hist\",\"data\":\"test\"}" \
+        > "$MOCK_CLAUDE_DIR/projects/$win_encoded/session1.jsonl"
+
+    # Add entry to history.jsonl with Windows-form path
+    echo "{\"project\":\"$win_hist\",\"session\":\"session1\"}" \
+        >> "$MOCK_CLAUDE_DIR/history.jsonl"
 }
 
 # Assert file exists
@@ -143,6 +178,19 @@ assert_not_contains() {
     local pattern="$2"
     local msg="${3:-File should not contain: $pattern}"
     if ! grep -qF -- "$pattern" "$file" 2>/dev/null; then
+        return 0
+    else
+        echo "  Assertion failed: $msg"
+        return 1
+    fi
+}
+
+# Assert two strings are equal
+assert_eq() {
+    local actual="$1"
+    local expected="$2"
+    local msg="${3:-Expected [$expected] but got [$actual]}"
+    if [[ "$actual" == "$expected" ]]; then
         return 0
     else
         echo "  Assertion failed: $msg"
@@ -303,6 +351,12 @@ test_symlink_source() {
 
     # Create symlink to it
     ln -s "$TEST_DIR/real-project" "$TEST_DIR/link-project"
+
+    # Skip if FS lacks real symlinks (MSYS without admin: `ln -s` makes a copy).
+    if [[ ! -L "$TEST_DIR/link-project" ]]; then
+        log_skip "Filesystem doesn't support symlinks (e.g. MSYS without admin), skipping"
+        return 0
+    fi
 
     # Move the symlink (should warn but proceed)
     local output
@@ -799,6 +853,330 @@ test_case_insensitive_path() {
 }
 
 # ============================================================================
+# WINDOWS PATH HANDLING - HELPER TESTS
+# ============================================================================
+
+test_encode_path_posix_basic() {
+    PATH_ENCODING="posix"
+    assert_eq "$(encode_path /home/me/foo)" "-home-me-foo"
+}
+
+test_encode_path_windows_git_bash_form() {
+    PATH_ENCODING="windows"
+    assert_eq "$(encode_path /d/projects/foo)" "D--projects-foo"
+}
+
+test_encode_path_windows_forward_slash() {
+    PATH_ENCODING="windows"
+    assert_eq "$(encode_path D:/projects/foo)" "D--projects-foo"
+}
+
+test_encode_path_windows_backslash() {
+    PATH_ENCODING="windows"
+    assert_eq "$(encode_path 'D:\projects\foo')" "D--projects-foo"
+}
+
+test_encode_path_windows_lowercase_drive() {
+    PATH_ENCODING="windows"
+    assert_eq "$(encode_path /c/users/me)" "C--users-me"
+}
+
+test_encode_path_windows_deep_multi_segment() {
+    PATH_ENCODING="windows"
+    assert_eq "$(encode_path /d/dev/example/some-deep-project)" \
+        "D--dev-example-some-deep-project"
+}
+
+test_encode_path_hyphen_collision_documented() {
+    # Lossy encoding: different paths can produce the same encoded form.
+    PATH_ENCODING="windows"
+    local a b
+    a=$(encode_path 'D:/my-cool-project')
+    b=$(encode_path 'D:/my/cool/project')
+    assert_eq "$a" "$b" "Both paths should encode identically (documented collision)"
+}
+
+test_to_history_form_posix_identity() {
+    PATH_ENCODING="posix"
+    assert_eq "$(to_history_form /home/me/foo)" "/home/me/foo"
+}
+
+test_to_history_form_windows() {
+    PATH_ENCODING="windows"
+    assert_eq "$(to_history_form 'D:/projects/foo')" 'D:\\projects\\foo'
+}
+
+test_to_history_form_windows_byte_exact() {
+    # Verify byte-for-byte that to_history_form produces 2 backslash bytes per separator.
+    PATH_ENCODING="windows"
+    local got_hex
+    got_hex=$(printf '%s' "$(to_history_form 'D:/projects/foo')" | xxd -p)
+    # Expected: D:\\projects\\foo as raw bytes — 5c5c per separator
+    assert_eq "$got_hex" "443a5c5c70726f6a656374735c5c666f6f"
+}
+
+test_from_history_form_posix_identity() {
+    PATH_ENCODING="posix"
+    assert_eq "$(from_history_form /home/me/foo)" "/home/me/foo"
+}
+
+test_from_history_form_windows() {
+    PATH_ENCODING="windows"
+    assert_eq "$(from_history_form 'D:\\projects\\foo')" "D:/projects/foo"
+}
+
+test_from_history_form_windows_byte_exact() {
+    PATH_ENCODING="windows"
+    local got_hex
+    got_hex=$(printf '%s' "$(from_history_form 'D:\\projects\\foo')" | xxd -p)
+    # Expected: D:/projects/foo as raw bytes — 2f per separator
+    assert_eq "$got_hex" "443a2f70726f6a656374732f666f6f"
+}
+
+test_to_from_roundtrip_basic() {
+    PATH_ENCODING="windows"
+    local sample="D:/projects/foo"
+    assert_eq "$(from_history_form "$(to_history_form "$sample")")" "$sample"
+}
+
+test_to_from_roundtrip_non_ascii() {
+    PATH_ENCODING="windows"
+    local sample='D:/Документы/foo'
+    assert_eq "$(from_history_form "$(to_history_form "$sample")")" "$sample"
+}
+
+test_to_from_roundtrip_with_spaces() {
+    PATH_ENCODING="windows"
+    local sample='D:/My Projects/cool app'
+    assert_eq "$(from_history_form "$(to_history_form "$sample")")" "$sample"
+}
+
+test_to_from_roundtrip_with_parens() {
+    PATH_ENCODING="windows"
+    local sample='D:/foo (copy)/bar'
+    assert_eq "$(from_history_form "$(to_history_form "$sample")")" "$sample"
+}
+
+test_is_absolute_path_posix_relative_rejected() {
+    PATH_ENCODING="posix"
+    if is_absolute_path "rel/path"; then
+        echo "  rel/path should not be absolute"
+        return 1
+    fi
+}
+
+test_is_absolute_path_windows_forms_accepted() {
+    PATH_ENCODING="windows"
+    is_absolute_path "D:/foo"   || { echo "  D:/foo should be absolute"; return 1; }
+    is_absolute_path 'D:\foo'   || { echo "  D:\\foo should be absolute"; return 1; }
+    is_absolute_path "/d/foo"   || { echo "  /d/foo should be absolute"; return 1; }
+}
+
+test_encode_path_unc_documented() {
+    # UNC handling is out of scope; encoded form indistinguishable.
+    # Test pins this behavior as baseline for improvement.
+    PATH_ENCODING="windows"
+    local back fwd
+    back=$(encode_path '\\server\share\foo')
+    fwd=$(encode_path '//server/share/foo')
+    assert_eq "$back" "--server-share-foo"
+    assert_eq "$fwd"  "--server-share-foo"
+}
+
+# ============================================================================
+# WINDOWS MODE - INTEGRATION TESTS
+# ============================================================================
+
+test_win_list_with_real_projects() {
+    create_mock_windows_project "$TEST_DIR/proj-a"
+    create_mock_windows_project "$TEST_DIR/proj-b"
+
+    PATH_ENCODING="windows"
+    local proj_a_win proj_b_win
+    proj_a_win=$(get_absolute_path "$TEST_DIR/proj-a")
+    proj_b_win=$(get_absolute_path "$TEST_DIR/proj-b")
+
+    local output
+    output=$("$SCRIPT" --encoding windows --list 2>&1)
+
+    if ! echo "$output" | grep -qF -- "$proj_a_win"; then
+        echo "  Expected proj-a in Windows form in output"
+        echo "  Output: $output"
+        return 1
+    fi
+    if ! echo "$output" | grep -qF -- "$proj_b_win"; then
+        echo "  Expected proj-b in Windows form in output"
+        echo "  Output: $output"
+        return 1
+    fi
+    # User-facing output should be in filesystem form, not history form.
+    if echo "$output" | grep -qE '\\\\'; then
+        echo "  Output should not contain double-backslash JSON-escape form"
+        echo "  Output: $output"
+        return 1
+    fi
+}
+
+test_win_verify_broken() {
+    create_mock_windows_project "$TEST_DIR/broken-proj"
+
+    PATH_ENCODING="windows"
+    local proj_win
+    proj_win=$(get_absolute_path "$TEST_DIR/broken-proj")
+
+    rm -rf "$TEST_DIR/broken-proj"
+
+    local output
+    output=$("$SCRIPT" --encoding windows --verify 2>&1)
+
+    if ! echo "$output" | grep -qF -- "$proj_win"; then
+        echo "  Expected broken path (Windows form) in verify output"
+        echo "  Output: $output"
+        return 1
+    fi
+    if echo "$output" | grep -qE '\\\\'; then
+        echo "  Output should not contain double-backslash JSON-escape form"
+        echo "  Output: $output"
+        return 1
+    fi
+}
+
+test_win_move_basic() {
+    create_mock_windows_project "$TEST_DIR/source-proj"
+
+    PATH_ENCODING="windows"
+    local source_win dest_win source_encoded dest_encoded
+    source_win=$(get_absolute_path "$TEST_DIR/source-proj")
+    dest_win=$(get_absolute_path "$TEST_DIR/dest-proj")
+    source_encoded=$(encode_path "$source_win")
+    dest_encoded=$(encode_path "$dest_win")
+
+    "$SCRIPT" --encoding windows "$source_win" "$dest_win" -f
+
+    assert_not_exists "$TEST_DIR/source-proj"           "Source folder should be gone" || return 1
+    assert_dir_exists "$TEST_DIR/dest-proj"             "Destination folder should exist" || return 1
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$source_encoded" \
+        "Old encoded session folder should be gone" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$dest_encoded" \
+        "New encoded session folder should exist" || return 1
+
+    local source_hist dest_hist
+    source_hist=$(to_history_form "$source_win")
+    dest_hist=$(to_history_form "$dest_win")
+    assert_not_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$source_hist" \
+        "History should not contain old path" || return 1
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$dest_hist" \
+        "History should contain new path" || return 1
+
+    # Session JSONL's embedded path reference should be updated too.
+    local jsonl="$MOCK_CLAUDE_DIR/projects/$dest_encoded/session1.jsonl"
+    assert_contains "$jsonl" "$dest_hist" \
+        "Session JSONL should contain new path" || return 1
+    assert_not_contains "$jsonl" "$source_hist" \
+        "Session JSONL should not contain old path" || return 1
+}
+
+test_win_fix_explicit() {
+    create_mock_windows_project "$TEST_DIR/old-loc"
+
+    PATH_ENCODING="windows"
+    local old_win
+    old_win=$(get_absolute_path "$TEST_DIR/old-loc")
+
+    # Move project outside of clamp (history.jsonl will reference missing path).
+    mkdir -p "$TEST_DIR/new-loc"
+    cp -R "$TEST_DIR/old-loc/." "$TEST_DIR/new-loc/"
+    rm -rf "$TEST_DIR/old-loc"
+
+    local new_win old_encoded new_encoded
+    new_win=$(get_absolute_path "$TEST_DIR/new-loc")
+    old_encoded=$(encode_path "$old_win")
+    new_encoded=$(encode_path "$new_win")
+
+    "$SCRIPT" --encoding windows --fix --from "$old_win" --to "$new_win" -f
+
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$old_encoded" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$new_encoded" || return 1
+
+    local new_hist old_hist
+    new_hist=$(to_history_form "$new_win")
+    old_hist=$(to_history_form "$old_win")
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$new_hist" || return 1
+    assert_not_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$old_hist" || return 1
+
+    local jsonl="$MOCK_CLAUDE_DIR/projects/$new_encoded/session1.jsonl"
+    assert_contains "$jsonl" "$new_hist" \
+        "Session JSONL should contain new path" || return 1
+}
+
+test_win_fix_auto_find_no_posix_leak() {
+    create_mock_windows_project "$TEST_DIR/auto-proj"
+
+    PATH_ENCODING="windows"
+    local old_win
+    old_win=$(get_absolute_path "$TEST_DIR/auto-proj")
+
+    # Manual mv to a location find can discover (under $HOME = $TEST_DIR)
+    mkdir -p "$TEST_DIR/new-home"
+    mv "$TEST_DIR/auto-proj" "$TEST_DIR/new-home/auto-proj"
+
+    local new_win
+    new_win=$(get_absolute_path "$TEST_DIR/new-home/auto-proj")
+
+    "$SCRIPT" --encoding windows --fix -f
+
+    local new_hist
+    new_hist=$(to_history_form "$new_win")
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$new_hist" \
+        "History should contain new Windows-form path after auto-fix" || return 1
+
+    # Regression check: no POSIX-mounted /c/... leak in history.jsonl.
+    if grep -qE '"project":"/[a-z]/' "$MOCK_CLAUDE_DIR/history.jsonl"; then
+        echo "  history.jsonl contains a POSIX-mounted-form path"
+        echo "  Indicates cd && pwd POSIX-form leak regression"
+        cat "$MOCK_CLAUDE_DIR/history.jsonl"
+        return 1
+    fi
+}
+
+test_win_move_with_spaces() {
+    create_mock_windows_project "$TEST_DIR/my proj"
+
+    PATH_ENCODING="windows"
+    local source_win dest_win dest_encoded
+    source_win=$(get_absolute_path "$TEST_DIR/my proj")
+    dest_win=$(get_absolute_path "$TEST_DIR/new proj")
+    dest_encoded=$(encode_path "$dest_win")
+
+    "$SCRIPT" --encoding windows "$source_win" "$dest_win" -f
+
+    assert_not_exists "$TEST_DIR/my proj"           "Source with space should be gone" || return 1
+    assert_dir_exists "$TEST_DIR/new proj"          "Destination with space should exist" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$dest_encoded" \
+        "New encoded session folder should exist" || return 1
+
+    local dest_hist
+    dest_hist=$(to_history_form "$dest_win")
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$dest_hist" \
+        "History should contain new Windows-form path (with spaces)" || return 1
+}
+
+test_encoding_flag_validation() {
+    if ! "$SCRIPT" --encoding posix --list > /dev/null 2>&1; then
+        echo "  --encoding posix should be accepted"
+        return 1
+    fi
+    if ! "$SCRIPT" --encoding windows --list > /dev/null 2>&1; then
+        echo "  --encoding windows should be accepted"
+        return 1
+    fi
+    assert_fails "Invalid --encoding value should be rejected" \
+        "$SCRIPT" --encoding invalid --list || return 1
+    assert_fails "--encoding with no argument should be rejected" \
+        "$SCRIPT" --encoding || return 1
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -854,6 +1232,35 @@ main() {
         test_prune_dry_run
         # case-sensitivity tests
         test_case_insensitive_path
+        # Windows path handling — helper tests
+        test_encode_path_posix_basic
+        test_encode_path_windows_git_bash_form
+        test_encode_path_windows_forward_slash
+        test_encode_path_windows_backslash
+        test_encode_path_windows_lowercase_drive
+        test_encode_path_windows_deep_multi_segment
+        test_encode_path_hyphen_collision_documented
+        test_to_history_form_posix_identity
+        test_to_history_form_windows
+        test_to_history_form_windows_byte_exact
+        test_from_history_form_posix_identity
+        test_from_history_form_windows
+        test_from_history_form_windows_byte_exact
+        test_to_from_roundtrip_basic
+        test_to_from_roundtrip_non_ascii
+        test_to_from_roundtrip_with_spaces
+        test_to_from_roundtrip_with_parens
+        test_is_absolute_path_posix_relative_rejected
+        test_is_absolute_path_windows_forms_accepted
+        test_encode_path_unc_documented
+        # Windows mode — integration tests
+        test_win_list_with_real_projects
+        test_win_verify_broken
+        test_win_move_basic
+        test_win_fix_explicit
+        test_win_fix_auto_find_no_posix_leak
+        test_win_move_with_spaces
+        test_encoding_flag_validation
     )
 
     # Run specific test or all tests

@@ -12,6 +12,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 The encoded path format converts `/path/to/dir` to `-path-to-dir`.
 
+## Releasing
+
+`VERSION="..."` inside the `clamp` script is the single source of truth. Run `scripts/release.sh X.Y.Z` to bump it, run tests, commit and tag. Pushing the `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which builds artifacts via `scripts/build-dist.sh` (templates in `packaging/`) and creates the GitHub release. See the Releasing section in README.md.
+
 ## Testing
 
 Test locally by running with `--dry-run` flag:
@@ -25,8 +29,8 @@ Test locally by running with `--dry-run` flag:
 - Implements atomic rollback via EXIT trap if any step fails
 - Handles macOS vs Linux `sed -i` differences
 - Path resolution works for both existing and non-existing destination paths
-- Must be compatible with bash 3.2 (macOS default) — no associative arrays
-- Encoded path format is lossy (can't decode back) — use history.jsonl as source of truth
+- Must be compatible with bash 3.2 (macOS default), so no associative arrays
+- Encoded path format is lossy (can't decode back), use history.jsonl as source of truth
 - `_list_has` uses `grep -qFx --` (note `--` to handle values starting with `-`)
 
 ## Migration Sequence

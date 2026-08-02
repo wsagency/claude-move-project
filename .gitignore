@@ -1,6 +1,9 @@
 # Claude Code local settings
 .claude/
 
+# Release artifacts
+dist/
+
 # Debug logs
 *.log
 firebase-debug.log

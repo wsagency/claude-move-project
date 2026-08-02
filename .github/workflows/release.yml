@@ -1,0 +1,80 @@
+# Release pipeline for clamp.
+#
+# Trigger: push a tag matching v* (normally created by scripts/release.sh).
+#
+# What it does:
+#   1. Checks the tag matches VERSION inside the clamp script.
+#   2. Runs the test suite.
+#   3. Builds artifacts with scripts/build-dist.sh (tarball, raw script,
+#      .deb, Homebrew formula, PKGBUILD, checksums).
+#   4. Creates a GitHub release with all artifacts attached.
+#   5. If the HOMEBREW_TAP_TOKEN secret is set, commits the rendered
+#      formula to <owner>/homebrew-tap at Formula/clamp.rb.
+#
+# AUR publishing stays manual: download the PKGBUILD asset from the
+# release and push it to the AUR (see README).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches script version
+        run: |
+          script_version=$(grep -m1 '^VERSION=' clamp | cut -d'"' -f2)
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$script_version" != "$tag_version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match VERSION=$script_version in clamp" >&2
+            exit 1
+          fi
+
+      - name: Run test suite
+        run: ./test.sh
+
+      - name: Build artifacts
+        env:
+          CLAMP_REPO: ${{ github.repository }}
+        run: ./scripts/build-dist.sh
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "clamp $GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/clamp \
+            dist/clamp-*.tar.gz \
+            dist/clamp_*_all.deb \
+            dist/clamp.rb \
+            dist/PKGBUILD \
+            dist/checksums.txt
+
+      - name: Publish formula to Homebrew tap
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.TAP_TOKEN }}
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"
+          tap_repo="$owner/homebrew-tap"
+          # Existing file sha is required by the contents API for updates
+          existing_sha=$(gh api "repos/$tap_repo/contents/Formula/clamp.rb" \
+            --jq .sha 2>/dev/null || true)
+          args=(-f message="chore: update clamp to $GITHUB_REF_NAME"
+                -f content="$(base64 -w0 dist/clamp.rb)")
+          if [ -n "$existing_sha" ]; then
+            args+=(-f sha="$existing_sha")
+          fi
+          gh api --method PUT "repos/$tap_repo/contents/Formula/clamp.rb" "${args[@]}"
+          echo "Formula pushed to $tap_repo"

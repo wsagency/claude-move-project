@@ -1423,7 +1423,7 @@ execute_list() {
 
     local project_count=0
     while IFS= read -r _p; do
-        [[ -n "$_p" ]] && ((project_count++))
+        [[ -n "$_p" ]] && ((project_count++)) || true
     done <<< "$projects"
 
     if [[ "$JSON_OUTPUT" == true ]]; then

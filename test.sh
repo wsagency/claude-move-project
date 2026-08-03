@@ -925,6 +925,32 @@ test_fix_nested_project_history() {
         "Old nested path should not remain in history" || return 1
 }
 
+test_move_nested_multi_cwd_history() {
+    # Sessions resumed from different directories record several cwd values
+    # in one file. The first cwd can be outside the nested project (e.g. the
+    # parent root); the folder must still be recognized as nested.
+    create_mock_project "$TEST_DIR/parent"
+    local source_abs="$TEST_DIR/parent"
+    local dest_abs="$TEST_DIR/dest-project"
+
+    mkdir -p "$source_abs/webapp"
+    local child_encoded="${source_abs//\//-}-webapp"
+    mkdir -p "$MOCK_CLAUDE_DIR/projects/$child_encoded"
+    {
+        echo "{\"type\":\"session\",\"cwd\":\"$TEST_DIR\",\"data\":\"resumed elsewhere\"}"
+        echo "{\"type\":\"session\",\"cwd\":\"$source_abs/webapp\",\"data\":\"test\"}"
+    } > "$MOCK_CLAUDE_DIR/projects/$child_encoded/session1.jsonl"
+    echo "{\"project\":\"$source_abs/webapp\",\"session\":\"session1\"}" >> "$MOCK_CLAUDE_DIR/history.jsonl"
+
+    "$SCRIPT" "$source_abs" "$dest_abs" -f
+
+    local new_child_encoded="${dest_abs//\//-}-webapp"
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$child_encoded" \
+        "Old nested history folder should be gone" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$new_child_encoded" \
+        "Nested folder with mixed cwd values should still be migrated" || return 1
+}
+
 test_move_merges_existing_history_folder() {
     # Destination history folder already exists (claude was opened at the
     # new location before running clamp). A plain mv would nest the old
@@ -1043,6 +1069,7 @@ main() {
         test_move_skips_lookalike_sibling
         test_move_nested_dry_run
         test_fix_nested_project_history
+        test_move_nested_multi_cwd_history
         test_move_merges_existing_history_folder
         test_fix_merges_existing_history_folder
     )

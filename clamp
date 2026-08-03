@@ -217,39 +217,51 @@ log_verbose() {
     fi
 }
 
-# Print the working directory recorded in a history folder's session files.
-# Claude Code stores a "cwd" field in every session entry. Prints nothing
-# if no session file contains one.
-session_folder_cwd() {
+# Scan a history folder's session files for recorded working directories.
+# Claude Code stores a "cwd" field in every session entry, and one file can
+# hold several distinct values when a session is resumed from different
+# directories. Returns 0 if any cwd lies inside the given path, 1 if cwd
+# values exist but none match, 2 if no session file records a cwd at all.
+folder_has_session_under() {
     local folder="$1"
-    local f cwd
+    local source_abs="$2"
+    local f cwd found_any=false
     for f in "$folder"/*.jsonl; do
         if [[ ! -f "$f" ]]; then
             continue
         fi
-        cwd=$(grep -m1 -o '"cwd":"[^"]*"' "$f" 2>/dev/null | cut -d'"' -f4) || cwd=""
-        if [[ -n "$cwd" ]]; then
-            printf '%s\n' "$cwd"
-            return 0
-        fi
+        while IFS= read -r cwd; do
+            if [[ -z "$cwd" ]]; then
+                continue
+            fi
+            found_any=true
+            if [[ "$cwd" == "$source_abs"/* ]]; then
+                return 0
+            fi
+        done < <(grep -o '"cwd":"[^"]*"' "$f" 2>/dev/null | cut -d'"' -f4 | sort -u)
     done
-    return 0
+    if [[ "$found_any" == true ]]; then
+        return 1
+    fi
+    return 2
 }
 
 # Check whether an encoded history folder belongs to a project nested inside
 # the given path. The encoded format is lossy: a sibling like /a/foo-bar
 # shares the encoded prefix of /a/foo, so a name match alone is not enough.
-# Confirm against the cwd recorded in the folder's session files, falling
-# back to nested paths listed in history.jsonl.
+# Confirm against the cwd values recorded in the folder's session files,
+# falling back to nested paths listed in history.jsonl only when the folder
+# records no cwd at all (a folder with cwds that all point elsewhere is a
+# sibling and must be left alone).
 is_child_history_folder() {
     local name="$1"
     local source_abs="$2"
-    local cwd
-    cwd=$(session_folder_cwd "$PROJECTS_DIR/$name")
-    if [[ -n "$cwd" ]]; then
-        if [[ "$cwd" == "$source_abs"/* ]]; then
-            return 0
-        fi
+    local cwd_result=0
+    folder_has_session_under "$PROJECTS_DIR/$name" "$source_abs" || cwd_result=$?
+    if [[ $cwd_result -eq 0 ]]; then
+        return 0
+    fi
+    if [[ $cwd_result -eq 1 ]]; then
         return 1
     fi
 

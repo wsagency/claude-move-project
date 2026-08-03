@@ -187,10 +187,21 @@ This script handles all three, ensuring your session history follows your projec
 
 1. Backup `history.jsonl`
 2. Move project folder to destination
-3. Rename history folder in `~/.claude/projects/`
-4. Update path references in `history.jsonl`
+3. Rename history folder in `~/.claude/projects/`, including folders of
+   nested projects (sub-projects and `.claude-worktrees` sessions)
+4. Update path references in `history.jsonl`, including nested paths
 
 If any step fails, all changes are automatically rolled back.
+
+### 📁 Nested Projects
+
+Claude Code treats every working directory as its own project. If you ran
+sessions from a subdirectory (for example `my-project/webapp`), those sessions
+live in a separate encoded folder in `~/.claude/projects/`. Both the move and
+fix operations detect these nested folders and migrate them along with the
+parent. Detection uses the `cwd` recorded in session files (with
+`history.jsonl` as fallback), so sibling projects that merely share a name
+prefix (like `my-project-api`) are left alone.
 
 ### 🔧 Fix Operation
 

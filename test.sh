@@ -88,6 +88,17 @@ create_mock_project() {
     echo "{\"project\":\"$abs_path\",\"session\":\"session1\"}" >> "$MOCK_CLAUDE_DIR/history.jsonl"
 }
 
+# Create a history folder with a session file that records its cwd,
+# plus a matching history.jsonl entry (mirrors real Claude Code data)
+create_mock_history_folder() {
+    local encoded="$1"
+    local cwd="$2"
+
+    mkdir -p "$MOCK_CLAUDE_DIR/projects/$encoded"
+    echo "{\"type\":\"session\",\"cwd\":\"$cwd\",\"data\":\"test\"}" > "$MOCK_CLAUDE_DIR/projects/$encoded/session1.jsonl"
+    echo "{\"project\":\"$cwd\",\"session\":\"session1\"}" >> "$MOCK_CLAUDE_DIR/history.jsonl"
+}
+
 # Assert file exists
 assert_exists() {
     local path="$1"
@@ -799,6 +810,122 @@ test_case_insensitive_path() {
 }
 
 # ============================================================================
+# NESTED PROJECT HISTORY TESTS
+# ============================================================================
+
+test_move_nested_project_history() {
+    # Parent project with a nested Claude project inside it
+    create_mock_project "$TEST_DIR/parent"
+    local source_abs="$TEST_DIR/parent"
+    local dest_abs="$TEST_DIR/dest-project"
+
+    mkdir -p "$source_abs/webapp"
+    local child_encoded="${source_abs//\//-}-webapp"
+    create_mock_history_folder "$child_encoded" "$source_abs/webapp"
+
+    "$SCRIPT" "$source_abs" "$dest_abs" -f
+
+    local new_child_encoded="${dest_abs//\//-}-webapp"
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$child_encoded" \
+        "Old nested history folder should be gone" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$new_child_encoded" \
+        "Nested history folder should be renamed" || return 1
+    assert_exists "$MOCK_CLAUDE_DIR/projects/$new_child_encoded/session1.jsonl" \
+        "Nested session file should survive the rename" || return 1
+    assert_not_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$source_abs/webapp" \
+        "Old nested path should not be in history" || return 1
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$dest_abs/webapp" \
+        "New nested path should be in history" || return 1
+}
+
+test_move_nested_worktree_history() {
+    create_mock_project "$TEST_DIR/parent"
+    local source_abs="$TEST_DIR/parent"
+    local dest_abs="$TEST_DIR/dest-project"
+
+    # Claude Code encodes /parent/.claude-worktrees/feature-x with the dot
+    # collapsed to a dash, producing a double dash after the parent prefix
+    local wt_encoded="${source_abs//\//-}--claude-worktrees-feature-x"
+    create_mock_history_folder "$wt_encoded" "$source_abs/.claude-worktrees/feature-x"
+
+    "$SCRIPT" "$source_abs" "$dest_abs" -f
+
+    local new_wt_encoded="${dest_abs//\//-}--claude-worktrees-feature-x"
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$wt_encoded" \
+        "Old worktree history folder should be gone" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$new_wt_encoded" \
+        "Worktree history folder should be renamed" || return 1
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$dest_abs/.claude-worktrees/feature-x" \
+        "Worktree history entry should point to new path" || return 1
+}
+
+test_move_skips_lookalike_sibling() {
+    create_mock_project "$TEST_DIR/parent"
+    local source_abs="$TEST_DIR/parent"
+    local dest_abs="$TEST_DIR/dest-project"
+
+    # Sibling project whose encoded name shares the parent's encoded prefix
+    # (-...-parent-api starts with -...-parent-) but is not a child
+    mkdir -p "$TEST_DIR/parent-api"
+    local sibling_encoded="${TEST_DIR//\//-}-parent-api"
+    create_mock_history_folder "$sibling_encoded" "$TEST_DIR/parent-api"
+
+    "$SCRIPT" "$source_abs" "$dest_abs" -f
+
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$sibling_encoded" \
+        "Sibling history folder should be untouched" || return 1
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$TEST_DIR/parent-api" \
+        "Sibling history entry should be unchanged" || return 1
+}
+
+test_move_nested_dry_run() {
+    create_mock_project "$TEST_DIR/parent"
+    local source_abs="$TEST_DIR/parent"
+    local dest_abs="$TEST_DIR/dest-project"
+
+    mkdir -p "$source_abs/webapp"
+    local child_encoded="${source_abs//\//-}-webapp"
+    create_mock_history_folder "$child_encoded" "$source_abs/webapp"
+
+    local output
+    output=$("$SCRIPT" "$source_abs" "$dest_abs" --dry-run)
+
+    if ! echo "$output" | grep -qF -- "$child_encoded"; then
+        echo "  Assertion failed: dry-run preview should list the nested history folder"
+        return 1
+    fi
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/$child_encoded" \
+        "Dry run must not rename the nested history folder" || return 1
+    assert_dir_exists "$source_abs" "Dry run must not move the project" || return 1
+}
+
+test_fix_nested_project_history() {
+    # Simulate a manual mv: project already at the new location,
+    # history data still under the old encoded names
+    local old_abs="$TEST_DIR/old-location"
+    local new_abs="$TEST_DIR/new-location"
+    mkdir -p "$new_abs/webapp"
+
+    local old_encoded="${old_abs//\//-}"
+    local old_child_encoded="${old_abs//\//-}-webapp"
+    create_mock_history_folder "$old_encoded" "$old_abs"
+    create_mock_history_folder "$old_child_encoded" "$old_abs/webapp"
+
+    "$SCRIPT" --fix --from "$old_abs" --to "$new_abs" -f
+
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/${new_abs//\//-}" \
+        "Main history folder should be renamed" || return 1
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$old_child_encoded" \
+        "Old nested history folder should be gone" || return 1
+    assert_dir_exists "$MOCK_CLAUDE_DIR/projects/${new_abs//\//-}-webapp" \
+        "Nested history folder should be renamed by --fix" || return 1
+    assert_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$new_abs/webapp" \
+        "Nested history entry should point to new path" || return 1
+    assert_not_contains "$MOCK_CLAUDE_DIR/history.jsonl" "$old_abs/webapp" \
+        "Old nested path should not remain in history" || return 1
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -854,6 +981,12 @@ main() {
         test_prune_dry_run
         # case-sensitivity tests
         test_case_insensitive_path
+        # nested project history tests
+        test_move_nested_project_history
+        test_move_nested_worktree_history
+        test_move_skips_lookalike_sibling
+        test_move_nested_dry_run
+        test_fix_nested_project_history
     )
 
     # Run specific test or all tests

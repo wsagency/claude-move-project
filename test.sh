@@ -925,6 +925,62 @@ test_fix_nested_project_history() {
         "Old nested path should not remain in history" || return 1
 }
 
+test_move_merges_existing_history_folder() {
+    # Destination history folder already exists (claude was opened at the
+    # new location before running clamp). A plain mv would nest the old
+    # folder inside it, hiding every session from --resume (issue #13).
+    create_mock_project "$TEST_DIR/parent"
+    local source_abs="$TEST_DIR/parent"
+    local dest_abs="$TEST_DIR/dest-project"
+    local old_encoded="${source_abs//\//-}"
+    local new_encoded="${dest_abs//\//-}"
+
+    mkdir -p "$MOCK_CLAUDE_DIR/projects/$new_encoded"
+    echo '{"type":"session","data":"new"}' > "$MOCK_CLAUDE_DIR/projects/$new_encoded/session2.jsonl"
+
+    "$SCRIPT" "$source_abs" "$dest_abs" -f
+
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$new_encoded/$old_encoded" \
+        "Old history folder must not be nested inside the new one" || return 1
+    assert_exists "$MOCK_CLAUDE_DIR/projects/$new_encoded/session1.jsonl" \
+        "Old session should be merged into the existing folder" || return 1
+    assert_exists "$MOCK_CLAUDE_DIR/projects/$new_encoded/session2.jsonl" \
+        "Existing session should be preserved" || return 1
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$old_encoded" \
+        "Old history folder should be gone after the merge" || return 1
+}
+
+test_fix_merges_existing_history_folder() {
+    # Manual mv already happened and claude was opened at the new location,
+    # so both old and new history folders exist (main and nested)
+    local old_abs="$TEST_DIR/old-location"
+    local new_abs="$TEST_DIR/new-location"
+    mkdir -p "$new_abs/webapp"
+
+    local old_encoded="${old_abs//\//-}"
+    local new_encoded="${new_abs//\//-}"
+    create_mock_history_folder "$old_encoded" "$old_abs"
+    create_mock_history_folder "${old_encoded}-webapp" "$old_abs/webapp"
+
+    mkdir -p "$MOCK_CLAUDE_DIR/projects/$new_encoded"
+    echo '{"type":"session","data":"new"}' > "$MOCK_CLAUDE_DIR/projects/$new_encoded/session2.jsonl"
+    mkdir -p "$MOCK_CLAUDE_DIR/projects/${new_encoded}-webapp"
+    echo '{"type":"session","data":"new"}' > "$MOCK_CLAUDE_DIR/projects/${new_encoded}-webapp/session2.jsonl"
+
+    "$SCRIPT" --fix --from "$old_abs" --to "$new_abs" -f
+
+    assert_exists "$MOCK_CLAUDE_DIR/projects/$new_encoded/session1.jsonl" \
+        "Old session should be merged into the existing folder" || return 1
+    assert_exists "$MOCK_CLAUDE_DIR/projects/$new_encoded/session2.jsonl" \
+        "Existing session should be preserved" || return 1
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/$old_encoded" \
+        "Old history folder should be gone after the merge" || return 1
+    assert_exists "$MOCK_CLAUDE_DIR/projects/${new_encoded}-webapp/session1.jsonl" \
+        "Old nested session should be merged into the existing folder" || return 1
+    assert_not_exists "$MOCK_CLAUDE_DIR/projects/${old_encoded}-webapp" \
+        "Old nested history folder should be gone after the merge" || return 1
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -987,6 +1043,8 @@ main() {
         test_move_skips_lookalike_sibling
         test_move_nested_dry_run
         test_fix_nested_project_history
+        test_move_merges_existing_history_folder
+        test_fix_merges_existing_history_folder
     )
 
     # Run specific test or all tests

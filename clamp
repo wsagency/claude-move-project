@@ -35,6 +35,9 @@ HISTORY_FOLDER_MOVED=false
 # (parallel arrays, bash 3.2 has no associative arrays)
 CHILD_FOLDERS_OLD=()
 CHILD_FOLDERS_NEW=()
+# Entries moved between history folders during a merge, tracked for rollback
+MERGED_SRC=()
+MERGED_DST=()
 SOURCE_ABS=""
 DEST_ABS=""
 OLD_ENCODED=""
@@ -264,6 +267,37 @@ is_child_history_folder() {
     return 1
 }
 
+# Merge the contents of a history folder into one that already exists at
+# the destination name. A plain mv would nest the source folder inside the
+# destination, hiding every session from claude --resume. Session files are
+# named by UUID so collisions are rare; entries that do collide are kept at
+# the destination and left behind with a warning. Removes the source folder
+# once empty.
+merge_history_folder() {
+    local src="$1"
+    local dst="$2"
+    local entry name
+    log_info "Destination exists, merging contents: $(basename "$dst")"
+    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+        if [[ ! -e "$entry" ]]; then
+            continue
+        fi
+        name=$(basename "$entry")
+        if [[ -e "$dst/$name" ]]; then
+            log_warn "Already exists at destination, left in place: $entry"
+            continue
+        fi
+        mv "$entry" "$dst/$name"
+        MERGED_SRC+=("$entry")
+        MERGED_DST+=("$dst/$name")
+    done
+    if rmdir "$src" 2>/dev/null; then
+        log_success "Merged history folder: $(basename "$src")"
+    else
+        log_warn "Source folder not empty after merge, kept: $src"
+    fi
+}
+
 # List encoded history folders of projects nested inside the given path
 # (sub-projects, worktrees). Prints one folder name per line.
 find_child_history_folders() {
@@ -293,7 +327,7 @@ cleanup() {
 
     # Only perform rollback if an operation actually started modifying state
     local has_state_to_rollback=false
-    if [[ -n "$BACKUP_FILE" || "$PROJECT_FOLDER_MOVED" == true || "$HISTORY_FOLDER_MOVED" == true || "$HISTORY_MODIFIED" == true || ${#CHILD_FOLDERS_NEW[@]} -gt 0 ]]; then
+    if [[ -n "$BACKUP_FILE" || "$PROJECT_FOLDER_MOVED" == true || "$HISTORY_FOLDER_MOVED" == true || "$HISTORY_MODIFIED" == true || ${#CHILD_FOLDERS_NEW[@]} -gt 0 || ${#MERGED_DST[@]} -gt 0 ]]; then
         has_state_to_rollback=true
     fi
 
@@ -309,6 +343,18 @@ cleanup() {
 
         case "$OPERATION" in
             move)
+                # Move merged session files back to their original folders
+                if [[ ${#MERGED_DST[@]} -gt 0 ]]; then
+                    local m
+                    for ((m = ${#MERGED_DST[@]} - 1; m >= 0; m--)); do
+                        if [[ -e "${MERGED_DST[$m]}" && ! -e "${MERGED_SRC[$m]}" ]]; then
+                            mkdir -p "$(dirname "${MERGED_SRC[$m]}")"
+                            mv "${MERGED_DST[$m]}" "${MERGED_SRC[$m]}"
+                        fi
+                    done
+                    log_info "Restored merged session files"
+                fi
+
                 # Move nested history folders back
                 if [[ ${#CHILD_FOLDERS_NEW[@]} -gt 0 ]]; then
                     local i
@@ -896,6 +942,9 @@ show_preview_move() {
     echo "History Migration:"
     echo "  From: $PROJECTS_DIR/$OLD_ENCODED/"
     echo "  To:   $PROJECTS_DIR/$NEW_ENCODED/"
+    if [[ -d "$PROJECTS_DIR/$OLD_ENCODED" && -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
+        echo "  Note: destination folder exists, contents will be merged"
+    fi
 
     # Count session files
     if [[ -d "$PROJECTS_DIR/$OLD_ENCODED" ]]; then
@@ -1158,12 +1207,18 @@ execute_move() {
     PROJECT_FOLDER_MOVED=true
     log_success "Moved project to: $DEST_ABS"
 
-    # Step 3: Rename history folder
+    # Step 3: Rename history folder. If the destination folder already
+    # exists (claude was opened at the new location before the migration),
+    # merge into it instead of nesting the old folder inside
     if [[ -d "$PROJECTS_DIR/$OLD_ENCODED" ]]; then
         log_info "Renaming history folder..."
-        mv "$PROJECTS_DIR/$OLD_ENCODED" "$PROJECTS_DIR/$NEW_ENCODED"
-        HISTORY_FOLDER_MOVED=true
-        log_success "Renamed history folder"
+        if [[ -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
+            merge_history_folder "$PROJECTS_DIR/$OLD_ENCODED" "$PROJECTS_DIR/$NEW_ENCODED"
+        else
+            mv "$PROJECTS_DIR/$OLD_ENCODED" "$PROJECTS_DIR/$NEW_ENCODED"
+            HISTORY_FOLDER_MOVED=true
+            log_success "Renamed history folder"
+        fi
     fi
 
     # Step 3b: Rename history folders of projects nested inside the moved
@@ -1175,7 +1230,7 @@ execute_move() {
         fi
         new_child="$NEW_ENCODED${child#"$OLD_ENCODED"}"
         if [[ -d "$PROJECTS_DIR/$new_child" ]]; then
-            log_warn "Nested history folder already exists, skipping: $new_child"
+            merge_history_folder "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
             continue
         fi
         mv "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
@@ -2010,23 +2065,23 @@ execute_fix_explicit() {
         log_success "Created backup: $BACKUP_FILE"
     fi
 
-    # Rename session folder
+    # Rename session folder, merging if the destination already exists
     if [[ -d "$PROJECTS_DIR/$old_encoded" ]]; then
         if [[ -d "$PROJECTS_DIR/$new_encoded" ]]; then
-            log_warn "New session folder already exists, skipping rename"
+            merge_history_folder "$PROJECTS_DIR/$old_encoded" "$PROJECTS_DIR/$new_encoded"
         else
             mv "$PROJECTS_DIR/$old_encoded" "$PROJECTS_DIR/$new_encoded"
             log_success "Renamed session folder"
         fi
     fi
 
-    # Rename nested session folders
+    # Rename nested session folders, merging if the destination exists
     if [[ -n "$child_folders" ]]; then
         local new_child
         while IFS= read -r child; do
             new_child="$new_encoded${child#"$old_encoded"}"
             if [[ -d "$PROJECTS_DIR/$new_child" ]]; then
-                log_warn "Nested session folder already exists, skipping: $new_child"
+                merge_history_folder "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
                 continue
             fi
             mv "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"

@@ -4,28 +4,49 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Platform: macOS | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue.svg)](https://github.com/wsagency/claude-move-project#supported-platforms)
+[![CI](https://github.com/wsagency/claude-move-project/actions/workflows/ci.yml/badge.svg)](https://github.com/wsagency/claude-move-project/actions/workflows/ci.yml)
 
 A bash utility that moves Claude Code projects while preserving all session history and settings.
 
 ## Features
 
-- 📦 **Move** project folders to new locations
-- 📂 **Move here** (`--here`) — move a project into the current directory
-- 🔧 **Fix** (`--fix`) — repair broken references after manual `mv`
-- 📋 **List** (`--list`) — show all Claude projects with status
-- ✅ **Verify** (`--verify`) — health check for project references
-- 🧹 **Prune** (`--prune`) — remove orphaned session folders
-- ℹ️ **Info** (`--info`) — detailed info about a single project
-- 🗑️ **Remove** projects and all associated session data (`--remove`)
-- 📤 **Pack** projects into portable `.claudepack` archives (`--pack`)
-- 📥 **Unpack** archives with automatic path rewriting (`--unpack`)
-- 🗂️ Auto-create parent directories with `-p`/`--parents`
-- 🔄 Automatically migrates session history from `~/.claude/projects/`
-- 📝 Updates all path references in `~/.claude/history.jsonl`
-- 🛡️ Atomic rollback if any step fails
-- 👀 Dry-run mode to preview changes before execution
+- **Move** project folders to new locations
+- **Move here** (`--here`): move a project into the current directory
+- **Fix** (`--fix`): repair broken references after manual `mv`
+- **List** (`--list`): show all Claude projects with status
+- **Verify** (`--verify`): health check for project references
+- **Prune** (`--prune`): remove orphaned session folders
+- **Info** (`--info`): detailed info about a single project
+- **Remove** projects and all associated session data (`--remove`)
+- **Pack** projects into portable `.claudepack` archives (`--pack`)
+- **Unpack** archives with automatic path rewriting (`--unpack`)
+- Auto-create parent directories with `-p`/`--parents`
+- Automatically migrates session history from `~/.claude/projects/`
+- Updates all path references in `~/.claude/history.jsonl`
+- Atomic rollback if any step fails
+- Dry-run mode to preview changes before execution
 
 ## Installation
+
+### Quick install (curl)
+
+Downloads the latest release, verifies its SHA-256 checksum and installs to `/usr/local/bin` (or `~/.local/bin` if that is not writable):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
+```
+
+Options via environment variables:
+
+```bash
+# Pin a specific version
+CLAMP_VERSION=1.4.1 curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
+
+# Choose the install directory
+CLAMP_BIN_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
+```
+
+To update, run the same command again. To uninstall, delete the `clamp` binary from the install directory.
 
 ### Homebrew (macOS/Linux)
 
@@ -33,17 +54,34 @@ A bash utility that moves Claude Code projects while preserving all session hist
 brew install wsagency/tap/clamp
 ```
 
+Update with `brew upgrade clamp`. The tap is refreshed automatically on every release (see [Releasing](#releasing)).
+
+### AUR (Arch Linux)
+
+```bash
+# with an AUR helper
+yay -S clamp
+```
+
+Alternatively, download the `PKGBUILD` asset from the [latest release](https://github.com/wsagency/claude-move-project/releases/latest) and run `makepkg -si`.
+
+### Debian/Ubuntu
+
+Each release ships a `.deb` package:
+
+```bash
+curl -fsSLO https://github.com/wsagency/claude-move-project/releases/latest/download/clamp_1.4.1_all.deb
+sudo apt install ./clamp_1.4.1_all.deb
+```
+
+Replace the version with the one shown on the [releases page](https://github.com/wsagency/claude-move-project/releases/latest). There is no apt repository; update by installing the newer `.deb`.
+
 ### Manual
 
 ```bash
 git clone https://github.com/wsagency/claude-move-project.git
 cd claude-move-project
 chmod +x clamp
-```
-
-Optionally, add to your PATH:
-
-```bash
 sudo ln -s "$(pwd)/clamp" /usr/local/bin/clamp
 ```
 
@@ -173,7 +211,7 @@ clamp ./my-app ~/projects
 | `-h, --help` | Show help message |
 | `--version` | Show version |
 
-## 🔍 How It Works
+## How It Works
 
 Claude Code stores project data in three locations:
 
@@ -183,7 +221,7 @@ Claude Code stores project data in three locations:
 
 This script handles all three, ensuring your session history follows your project.
 
-### 🔄 Migration Sequence
+### Migration Sequence
 
 1. Backup `history.jsonl`
 2. Move project folder to destination
@@ -192,7 +230,7 @@ This script handles all three, ensuring your session history follows your projec
 
 If any step fails, all changes are automatically rolled back.
 
-### 🔧 Fix Operation
+### Fix Operation
 
 The most common scenario: you already moved a folder with `mv` and Claude sessions broke.
 
@@ -207,7 +245,7 @@ clamp --fix ~/new/location/my-project
 clamp --fix --from ~/old/path --to ~/new/path
 ```
 
-### 📦 Archive Format (.claudepack)
+### Archive Format (.claudepack)
 
 The `--pack` command creates a tar.gz archive with this structure:
 
@@ -221,7 +259,7 @@ project-name.claudepack
 
 When unpacking, paths are automatically rewritten to match the new destination.
 
-## 🧪 Testing
+## Testing
 
 Run the test suite to verify the script works correctly:
 
@@ -250,13 +288,81 @@ The test suite covers:
 - `--fix` (explicit paths, auto-detect, nothing broken)
 - `--prune` (orphaned folders, nothing to prune, dry-run)
 
-## 🖥️ Supported Platforms
+Continuous integration runs the suite on Ubuntu and macOS, plus `shellcheck`, on every push and pull request (`.github/workflows/ci.yml`). The macOS job matters because it runs bash 3.2, the oldest version clamp supports.
+
+## Releasing
+
+For maintainers. The whole flow is: bump, tag, push. GitHub Actions does the rest.
+
+```bash
+# 1. Bump the version, run tests, commit and tag (nothing is pushed yet)
+scripts/release.sh 1.5.0
+
+# 2. Publish
+git push origin main v1.5.0
+```
+
+The version in the `clamp` script (`VERSION="..."`) is the single source of truth. `scripts/release.sh` updates it, runs `./test.sh`, commits `chore: release v1.5.0` and creates the annotated tag `v1.5.0`.
+
+### What the Release workflow does
+
+Pushing a `v*` tag triggers `.github/workflows/release.yml`, which:
+
+1. Fails if the tag does not match `VERSION` inside the `clamp` script.
+2. Runs the test suite.
+3. Builds all artifacts with `scripts/build-dist.sh`.
+4. Creates a GitHub release with generated notes and these assets:
+
+| Asset | Purpose |
+|-------|---------|
+| `clamp` | Raw script, downloaded by `install.sh` |
+| `clamp-X.Y.Z.tar.gz` | Source tarball for Homebrew and the AUR |
+| `clamp_X.Y.Z_all.deb` | Debian/Ubuntu package |
+| `clamp.rb` | Homebrew formula pinned to this release |
+| `PKGBUILD` | AUR build file pinned to this release |
+| `checksums.txt` | SHA-256 checksums of all assets |
+
+5. If the `HOMEBREW_TAP_TOKEN` secret is set, commits `clamp.rb` to `<owner>/homebrew-tap` at `Formula/clamp.rb`.
+
+You can build the same artifacts locally with `scripts/build-dist.sh` (output goes to `dist/`, which is gitignored). The formula and PKGBUILD are rendered from the templates in `packaging/`.
+
+### One-time setup per channel
+
+- **curl install and .deb**: nothing to set up. They work as soon as the first release exists.
+- **Homebrew**: the tap repository (`wsagency/homebrew-tap`) already exists. Add a repository secret `HOMEBREW_TAP_TOKEN` here (a fine-grained personal access token with read/write contents permission on `homebrew-tap`) and the workflow keeps `Formula/clamp.rb` up to date. Users run `brew install wsagency/tap/clamp`.
+- **AUR**: publishing is manual because it needs your personal AUR SSH key. After each release, download the `PKGBUILD` asset, then:
+
+  ```bash
+  git clone ssh://aur@aur.archlinux.org/clamp.git aur-clamp
+  cp PKGBUILD aur-clamp/
+  cd aur-clamp
+  makepkg --printsrcinfo > .SRCINFO
+  git add PKGBUILD .SRCINFO
+  git commit -m "Update to 1.5.0"
+  git push
+  ```
+
+  This can be automated later with an AUR deploy action and an SSH key secret.
+- **apt**: the `.deb` asset covers direct installs. A real apt repository (PPA or self-hosted) is out of scope for now.
+
+### For downstream package maintainers
+
+Every release provides stable URLs:
+
+```
+https://github.com/wsagency/claude-move-project/releases/download/vX.Y.Z/clamp-X.Y.Z.tar.gz
+https://github.com/wsagency/claude-move-project/releases/latest/download/checksums.txt
+```
+
+The tarball contains a `clamp-X.Y.Z/` directory with the `clamp` script, `LICENSE` and `README.md`. The `clamp.rb` and `PKGBUILD` assets already contain the correct version and SHA-256, so packaging for another distribution usually means adapting one of them.
+
+## Supported Platforms
 
 | Platform | Status |
 |----------|--------|
-| macOS | ✅ Fully supported |
-| Linux | ✅ Supported |
-| Windows | ⚠️ Via WSL or Git Bash |
+| macOS | Fully supported |
+| Linux | Supported |
+| Windows | Via WSL or Git Bash |
 
 ### Windows Users
 

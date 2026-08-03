@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    strategy:
+      matrix:
+        # macos-latest ships bash 3.2, which clamp must stay compatible with
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite
+        run: ./test.sh
+
+  lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check
+        run: |
+          bash -n clamp
+          bash -n test.sh
+          bash -n install.sh
+          bash -n scripts/build-dist.sh
+          bash -n scripts/release.sh
+      - name: ShellCheck (error severity)
+        run: shellcheck --severity=error clamp test.sh install.sh scripts/*.sh

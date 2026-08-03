@@ -1,0 +1,22 @@
+#tmpl# PKGBUILD template for the AUR.
+#tmpl# Rendered by scripts/build-dist.sh at release time. Placeholders:
+#tmpl#   {{VERSION}} release version, {{SHA256}} tarball checksum,
+#tmpl#   {{REPO}} GitHub owner/repo slug.
+#tmpl# Lines starting with #tmpl# are stripped from the rendered file.
+# Generate .SRCINFO with: makepkg --printsrcinfo > .SRCINFO
+# Maintainer: Kristijan Lukačin <kristijan@gmail.com>
+pkgname=clamp
+pkgver={{VERSION}}
+pkgrel=1
+pkgdesc="Move Claude Code projects while preserving session history"
+arch=('any')
+url="https://github.com/{{REPO}}"
+license=('MIT')
+depends=('bash')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/{{REPO}}/releases/download/v$pkgver/clamp-$pkgver.tar.gz")
+sha256sums=('{{SHA256}}')
+
+package() {
+  install -Dm755 "$srcdir/clamp-$pkgver/clamp" "$pkgdir/usr/bin/clamp"
+  install -Dm644 "$srcdir/clamp-$pkgver/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

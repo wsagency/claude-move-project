@@ -34,7 +34,9 @@ Test locally by running with `--dry-run` flag:
 The script performs operations in this order (critical for rollback):
 1. Backup `history.jsonl`
 2. Move project folder
-3. Rename history folder in `~/.claude/projects/`
+3. Rename history folder in `~/.claude/projects/`, plus nested project
+   folders (sub-projects, worktrees) verified via the `cwd` field in
+   session files
 4. Update path references in `history.jsonl`
 
 Rollback reverses these steps if any operation fails.

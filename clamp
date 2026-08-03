@@ -31,6 +31,13 @@ NC='\033[0m' # No Color
 BACKUP_FILE=""
 PROJECT_FOLDER_MOVED=false
 HISTORY_FOLDER_MOVED=false
+# Nested history folders renamed during a move, tracked for rollback
+# (parallel arrays, bash 3.2 has no associative arrays)
+CHILD_FOLDERS_OLD=()
+CHILD_FOLDERS_NEW=()
+# Entries moved between history folders during a merge, tracked for rollback
+MERGED_SRC=()
+MERGED_DST=()
 SOURCE_ABS=""
 DEST_ABS=""
 OLD_ENCODED=""
@@ -210,6 +217,116 @@ log_verbose() {
     fi
 }
 
+# Scan a history folder's session files for recorded working directories.
+# Claude Code stores a "cwd" field in every session entry, and one file can
+# hold several distinct values when a session is resumed from different
+# directories. Returns 0 if any cwd lies inside the given path, 1 if cwd
+# values exist but none match, 2 if no session file records a cwd at all.
+folder_has_session_under() {
+    local folder="$1"
+    local source_abs="$2"
+    local f cwd found_any=false
+    for f in "$folder"/*.jsonl; do
+        if [[ ! -f "$f" ]]; then
+            continue
+        fi
+        while IFS= read -r cwd; do
+            if [[ -z "$cwd" ]]; then
+                continue
+            fi
+            found_any=true
+            if [[ "$cwd" == "$source_abs"/* ]]; then
+                return 0
+            fi
+        done < <(grep -o '"cwd":"[^"]*"' "$f" 2>/dev/null | cut -d'"' -f4 | sort -u)
+    done
+    if [[ "$found_any" == true ]]; then
+        return 1
+    fi
+    return 2
+}
+
+# Check whether an encoded history folder belongs to a project nested inside
+# the given path. The encoded format is lossy: a sibling like /a/foo-bar
+# shares the encoded prefix of /a/foo, so a name match alone is not enough.
+# Confirm against the cwd values recorded in the folder's session files,
+# falling back to nested paths listed in history.jsonl only when the folder
+# records no cwd at all (a folder with cwds that all point elsewhere is a
+# sibling and must be left alone).
+is_child_history_folder() {
+    local name="$1"
+    local source_abs="$2"
+    local cwd_result=0
+    folder_has_session_under "$PROJECTS_DIR/$name" "$source_abs" || cwd_result=$?
+    if [[ $cwd_result -eq 0 ]]; then
+        return 0
+    fi
+    if [[ $cwd_result -eq 1 ]]; then
+        return 1
+    fi
+
+    if [[ -f "$HISTORY_FILE" ]]; then
+        local project
+        while IFS= read -r project; do
+            if [[ "$project" != "$source_abs"/* ]]; then
+                continue
+            fi
+            if [[ "$(encode_path "$project")" == "$name" ]]; then
+                return 0
+            fi
+        done < <(grep -o '"project":"[^"]*"' "$HISTORY_FILE" 2>/dev/null | cut -d'"' -f4 | sort -u)
+    fi
+    return 1
+}
+
+# Merge the contents of a history folder into one that already exists at
+# the destination name. A plain mv would nest the source folder inside the
+# destination, hiding every session from claude --resume. Session files are
+# named by UUID so collisions are rare; entries that do collide are kept at
+# the destination and left behind with a warning. Removes the source folder
+# once empty.
+merge_history_folder() {
+    local src="$1"
+    local dst="$2"
+    local entry name
+    log_info "Destination exists, merging contents: $(basename "$dst")"
+    for entry in "$src"/* "$src"/.[!.]* "$src"/..?*; do
+        if [[ ! -e "$entry" ]]; then
+            continue
+        fi
+        name=$(basename "$entry")
+        if [[ -e "$dst/$name" ]]; then
+            log_warn "Already exists at destination, left in place: $entry"
+            continue
+        fi
+        mv "$entry" "$dst/$name"
+        MERGED_SRC+=("$entry")
+        MERGED_DST+=("$dst/$name")
+    done
+    if rmdir "$src" 2>/dev/null; then
+        log_success "Merged history folder: $(basename "$src")"
+    else
+        log_warn "Source folder not empty after merge, kept: $src"
+    fi
+}
+
+# List encoded history folders of projects nested inside the given path
+# (sub-projects, worktrees). Prints one folder name per line.
+find_child_history_folders() {
+    local old_encoded="$1"
+    local source_abs="$2"
+    local folder name
+    for folder in "$PROJECTS_DIR/$old_encoded"-*; do
+        if [[ ! -d "$folder" ]]; then
+            continue
+        fi
+        name=$(basename "$folder")
+        if is_child_history_folder "$name" "$source_abs"; then
+            printf '%s\n' "$name"
+        fi
+    done
+}
+
 # Rollback on failure
 cleanup() {
     local exit_code=$?
@@ -222,7 +339,7 @@ cleanup() {
 
     # Only perform rollback if an operation actually started modifying state
     local has_state_to_rollback=false
-    if [[ -n "$BACKUP_FILE" || "$PROJECT_FOLDER_MOVED" == true || "$HISTORY_FOLDER_MOVED" == true || "$HISTORY_MODIFIED" == true ]]; then
+    if [[ -n "$BACKUP_FILE" || "$PROJECT_FOLDER_MOVED" == true || "$HISTORY_FOLDER_MOVED" == true || "$HISTORY_MODIFIED" == true || ${#CHILD_FOLDERS_NEW[@]} -gt 0 || ${#MERGED_DST[@]} -gt 0 ]]; then
         has_state_to_rollback=true
     fi
 
@@ -238,6 +355,29 @@ cleanup() {
 
         case "$OPERATION" in
             move)
+                # Move merged session files back to their original folders
+                if [[ ${#MERGED_DST[@]} -gt 0 ]]; then
+                    local m
+                    for ((m = ${#MERGED_DST[@]} - 1; m >= 0; m--)); do
+                        if [[ -e "${MERGED_DST[$m]}" && ! -e "${MERGED_SRC[$m]}" ]]; then
+                            mkdir -p "$(dirname "${MERGED_SRC[$m]}")"
+                            mv "${MERGED_DST[$m]}" "${MERGED_SRC[$m]}"
+                        fi
+                    done
+                    log_info "Restored merged session files"
+                fi
+
+                # Move nested history folders back
+                if [[ ${#CHILD_FOLDERS_NEW[@]} -gt 0 ]]; then
+                    local i
+                    for ((i = 0; i < ${#CHILD_FOLDERS_NEW[@]}; i++)); do
+                        if [[ -d "$PROJECTS_DIR/${CHILD_FOLDERS_NEW[$i]}" ]]; then
+                            mv "$PROJECTS_DIR/${CHILD_FOLDERS_NEW[$i]}" "$PROJECTS_DIR/${CHILD_FOLDERS_OLD[$i]}"
+                        fi
+                    done
+                    log_info "Restored nested history folders"
+                fi
+
                 # Move history folder back
                 if [[ "$HISTORY_FOLDER_MOVED" == true && -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
                     mv "$PROJECTS_DIR/$NEW_ENCODED" "$PROJECTS_DIR/$OLD_ENCODED"
@@ -814,6 +954,9 @@ show_preview_move() {
     echo "History Migration:"
     echo "  From: $PROJECTS_DIR/$OLD_ENCODED/"
     echo "  To:   $PROJECTS_DIR/$NEW_ENCODED/"
+    if [[ -d "$PROJECTS_DIR/$OLD_ENCODED" && -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
+        echo "  Note: destination folder exists, contents will be merged"
+    fi
 
     # Count session files
     if [[ -d "$PROJECTS_DIR/$OLD_ENCODED" ]]; then
@@ -825,13 +968,29 @@ show_preview_move() {
     fi
     echo ""
 
+    # Nested project histories (sub-projects, worktrees)
+    local child_folders child
+    child_folders=$(find_child_history_folders "$OLD_ENCODED" "$SOURCE_ABS")
+    if [[ -n "$child_folders" ]]; then
+        echo "Nested Project Histories:"
+        while IFS= read -r child; do
+            echo "  $child/"
+            echo "    → $NEW_ENCODED${child#"$OLD_ENCODED"}/"
+        done <<< "$child_folders"
+        echo ""
+    fi
+
     # Count history.jsonl entries
     if [[ -f "$HISTORY_FILE" ]]; then
-        local entry_count
+        local entry_count nested_entry_count
         entry_count=$(grep -c -F -- "\"project\":\"$SOURCE_ABS\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        nested_entry_count=$(grep -c -F -- "\"project\":\"$SOURCE_ABS/" "$HISTORY_FILE" 2>/dev/null) || nested_entry_count=0
         echo "History Index Updates:"
         echo "  File: $HISTORY_FILE"
         echo "  Entries to update: $entry_count reference(s)"
+        if [[ $nested_entry_count -gt 0 ]]; then
+            echo "  Nested entries to update: $nested_entry_count reference(s)"
+        fi
     else
         echo "History Index: (file not found)"
     fi
@@ -1060,13 +1219,37 @@ execute_move() {
     PROJECT_FOLDER_MOVED=true
     log_success "Moved project to: $DEST_ABS"
 
-    # Step 3: Rename history folder
+    # Step 3: Rename history folder. If the destination folder already
+    # exists (claude was opened at the new location before the migration),
+    # merge into it instead of nesting the old folder inside
     if [[ -d "$PROJECTS_DIR/$OLD_ENCODED" ]]; then
         log_info "Renaming history folder..."
-        mv "$PROJECTS_DIR/$OLD_ENCODED" "$PROJECTS_DIR/$NEW_ENCODED"
-        HISTORY_FOLDER_MOVED=true
-        log_success "Renamed history folder"
+        if [[ -d "$PROJECTS_DIR/$NEW_ENCODED" ]]; then
+            merge_history_folder "$PROJECTS_DIR/$OLD_ENCODED" "$PROJECTS_DIR/$NEW_ENCODED"
+        else
+            mv "$PROJECTS_DIR/$OLD_ENCODED" "$PROJECTS_DIR/$NEW_ENCODED"
+            HISTORY_FOLDER_MOVED=true
+            log_success "Renamed history folder"
+        fi
     fi
+
+    # Step 3b: Rename history folders of projects nested inside the moved
+    # project (sub-projects, worktrees), which have their own encoded folders
+    local child new_child
+    while IFS= read -r child; do
+        if [[ -z "$child" ]]; then
+            continue
+        fi
+        new_child="$NEW_ENCODED${child#"$OLD_ENCODED"}"
+        if [[ -d "$PROJECTS_DIR/$new_child" ]]; then
+            merge_history_folder "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
+            continue
+        fi
+        mv "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
+        CHILD_FOLDERS_OLD+=("$child")
+        CHILD_FOLDERS_NEW+=("$new_child")
+        log_success "Renamed nested history folder: $child"
+    done < <(find_child_history_folders "$OLD_ENCODED" "$SOURCE_ABS")
 
     # Step 4: Update history.jsonl
     if [[ -f "$HISTORY_FILE" ]]; then
@@ -1079,11 +1262,17 @@ execute_move() {
         log_verbose "Escaped source for sed: $old_escaped"
         log_verbose "Escaped destination for sed: $new_escaped"
 
+        # Two patterns: exact match for the project itself, prefix match
+        # (trailing slash) for projects nested inside it
         # macOS sed requires '' after -i, Linux doesn't
         if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
+            sed -i '' \
+                -e "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" \
+                -e "s|\"project\":\"$old_escaped/|\"project\":\"$new_escaped/|g" "$HISTORY_FILE"
         else
-            sed -i "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
+            sed -i \
+                -e "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" \
+                -e "s|\"project\":\"$old_escaped/|\"project\":\"$new_escaped/|g" "$HISTORY_FILE"
         fi
         log_success "Updated history index"
     fi
@@ -1833,12 +2022,28 @@ execute_fix_explicit() {
         log_warn "No session folder found for either path"
     fi
 
-    # Check history entries
-    local entry_count=0
+    # Check session folders of nested projects (sub-projects, worktrees)
+    local child_folders child
+    child_folders=$(find_child_history_folders "$old_encoded" "$old_path")
+    if [[ -n "$child_folders" ]]; then
+        while IFS= read -r child; do
+            echo "Nested session folder: $PROJECTS_DIR/$child/"
+            echo "  → $PROJECTS_DIR/$new_encoded${child#"$old_encoded"}/"
+        done <<< "$child_folders"
+        changes=1
+    fi
+
+    # Check history entries (exact path plus nested paths)
+    local entry_count=0 nested_entry_count=0
     if [[ -f "$HISTORY_FILE" ]]; then
         entry_count=$(grep -c -F -- "\"project\":\"$old_path\"" "$HISTORY_FILE" 2>/dev/null) || entry_count=0
+        nested_entry_count=$(grep -c -F -- "\"project\":\"$old_path/" "$HISTORY_FILE" 2>/dev/null) || nested_entry_count=0
         if [[ $entry_count -gt 0 ]]; then
             echo "History entries to update: $entry_count"
+            changes=1
+        fi
+        if [[ $nested_entry_count -gt 0 ]]; then
+            echo "Nested history entries to update: $nested_entry_count"
             changes=1
         fi
     fi
@@ -1872,28 +2077,46 @@ execute_fix_explicit() {
         log_success "Created backup: $BACKUP_FILE"
     fi
 
-    # Rename session folder
+    # Rename session folder, merging if the destination already exists
     if [[ -d "$PROJECTS_DIR/$old_encoded" ]]; then
         if [[ -d "$PROJECTS_DIR/$new_encoded" ]]; then
-            log_warn "New session folder already exists, skipping rename"
+            merge_history_folder "$PROJECTS_DIR/$old_encoded" "$PROJECTS_DIR/$new_encoded"
         else
             mv "$PROJECTS_DIR/$old_encoded" "$PROJECTS_DIR/$new_encoded"
             log_success "Renamed session folder"
         fi
     fi
 
-    # Update history.jsonl
-    if [[ -f "$HISTORY_FILE" && $entry_count -gt 0 ]]; then
+    # Rename nested session folders, merging if the destination exists
+    if [[ -n "$child_folders" ]]; then
+        local new_child
+        while IFS= read -r child; do
+            new_child="$new_encoded${child#"$old_encoded"}"
+            if [[ -d "$PROJECTS_DIR/$new_child" ]]; then
+                merge_history_folder "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
+                continue
+            fi
+            mv "$PROJECTS_DIR/$child" "$PROJECTS_DIR/$new_child"
+            log_success "Renamed nested session folder: $child"
+        done <<< "$child_folders"
+    fi
+
+    # Update history.jsonl (exact path plus nested paths)
+    if [[ -f "$HISTORY_FILE" && $((entry_count + nested_entry_count)) -gt 0 ]]; then
         local old_escaped new_escaped
         old_escaped=$(escape_for_sed "$old_path")
         new_escaped=$(escape_for_sed "$new_path")
 
         if [[ "$(uname)" == "Darwin" ]]; then
-            sed -i '' "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
+            sed -i '' \
+                -e "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" \
+                -e "s|\"project\":\"$old_escaped/|\"project\":\"$new_escaped/|g" "$HISTORY_FILE"
         else
-            sed -i "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" "$HISTORY_FILE"
+            sed -i \
+                -e "s|\"project\":\"$old_escaped\"|\"project\":\"$new_escaped\"|g" \
+                -e "s|\"project\":\"$old_escaped/|\"project\":\"$new_escaped/|g" "$HISTORY_FILE"
         fi
-        log_success "Updated $entry_count history entries"
+        log_success "Updated $((entry_count + nested_entry_count)) history entries"
     fi
 
     echo ""

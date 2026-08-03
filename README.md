@@ -3,8 +3,8 @@
 **CL**aude **A**I **M**ove **P**roject
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: macOS | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue.svg)](https://github.com/brunos3d/claude-move-project#supported-platforms)
-[![CI](https://github.com/brunos3d/claude-move-project/actions/workflows/ci.yml/badge.svg)](https://github.com/brunos3d/claude-move-project/actions/workflows/ci.yml)
+[![Platform: macOS | Linux](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux-blue.svg)](https://github.com/wsagency/claude-move-project#supported-platforms)
+[![CI](https://github.com/wsagency/claude-move-project/actions/workflows/ci.yml/badge.svg)](https://github.com/wsagency/claude-move-project/actions/workflows/ci.yml)
 
 A bash utility that moves Claude Code projects while preserving all session history and settings.
 
@@ -33,17 +33,17 @@ A bash utility that moves Claude Code projects while preserving all session hist
 Downloads the latest release, verifies its SHA-256 checksum and installs to `/usr/local/bin` (or `~/.local/bin` if that is not writable):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brunos3d/claude-move-project/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
 ```
 
 Options via environment variables:
 
 ```bash
 # Pin a specific version
-CLAMP_VERSION=1.4.1 curl -fsSL https://raw.githubusercontent.com/brunos3d/claude-move-project/main/install.sh | bash
+CLAMP_VERSION=1.4.1 curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
 
 # Choose the install directory
-CLAMP_BIN_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/brunos3d/claude-move-project/main/install.sh | bash
+CLAMP_BIN_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
 ```
 
 To update, run the same command again. To uninstall, delete the `clamp` binary from the install directory.
@@ -51,7 +51,7 @@ To update, run the same command again. To uninstall, delete the `clamp` binary f
 ### Homebrew (macOS/Linux)
 
 ```bash
-brew install brunos3d/tap/clamp
+brew install wsagency/tap/clamp
 ```
 
 Update with `brew upgrade clamp`. The tap is refreshed automatically on every release (see [Releasing](#releasing)).
@@ -63,23 +63,23 @@ Update with `brew upgrade clamp`. The tap is refreshed automatically on every re
 yay -S clamp
 ```
 
-Alternatively, download the `PKGBUILD` asset from the [latest release](https://github.com/brunos3d/claude-move-project/releases/latest) and run `makepkg -si`.
+Alternatively, download the `PKGBUILD` asset from the [latest release](https://github.com/wsagency/claude-move-project/releases/latest) and run `makepkg -si`.
 
 ### Debian/Ubuntu
 
 Each release ships a `.deb` package:
 
 ```bash
-curl -fsSLO https://github.com/brunos3d/claude-move-project/releases/latest/download/clamp_1.4.1_all.deb
+curl -fsSLO https://github.com/wsagency/claude-move-project/releases/latest/download/clamp_1.4.1_all.deb
 sudo apt install ./clamp_1.4.1_all.deb
 ```
 
-Replace the version with the one shown on the [releases page](https://github.com/brunos3d/claude-move-project/releases/latest). There is no apt repository; update by installing the newer `.deb`.
+Replace the version with the one shown on the [releases page](https://github.com/wsagency/claude-move-project/releases/latest). There is no apt repository; update by installing the newer `.deb`.
 
 ### Manual
 
 ```bash
-git clone https://github.com/brunos3d/claude-move-project.git
+git clone https://github.com/wsagency/claude-move-project.git
 cd claude-move-project
 chmod +x clamp
 sudo ln -s "$(pwd)/clamp" /usr/local/bin/clamp
@@ -329,7 +329,7 @@ You can build the same artifacts locally with `scripts/build-dist.sh` (output go
 ### One-time setup per channel
 
 - **curl install and .deb**: nothing to set up. They work as soon as the first release exists.
-- **Homebrew**: create a public repository named `homebrew-tap` under your account, then add a repository secret `HOMEBREW_TAP_TOKEN` here (a fine-grained personal access token with read/write contents permission on `homebrew-tap`). Users then run `brew install <owner>/tap/clamp`.
+- **Homebrew**: the tap repository (`wsagency/homebrew-tap`) already exists. Add a repository secret `HOMEBREW_TAP_TOKEN` here (a fine-grained personal access token with read/write contents permission on `homebrew-tap`) and the workflow keeps `Formula/clamp.rb` up to date. Users run `brew install wsagency/tap/clamp`.
 - **AUR**: publishing is manual because it needs your personal AUR SSH key. After each release, download the `PKGBUILD` asset, then:
 
   ```bash
@@ -350,8 +350,8 @@ You can build the same artifacts locally with `scripts/build-dist.sh` (output go
 Every release provides stable URLs:
 
 ```
-https://github.com/brunos3d/claude-move-project/releases/download/vX.Y.Z/clamp-X.Y.Z.tar.gz
-https://github.com/brunos3d/claude-move-project/releases/latest/download/checksums.txt
+https://github.com/wsagency/claude-move-project/releases/download/vX.Y.Z/clamp-X.Y.Z.tar.gz
+https://github.com/wsagency/claude-move-project/releases/latest/download/checksums.txt
 ```
 
 The tarball contains a `clamp-X.Y.Z/` directory with the `clamp` script, `LICENSE` and `README.md`. The `clamp.rb` and `PKGBUILD` assets already contain the correct version and SHA-256, so packaging for another distribution usually means adapting one of them.

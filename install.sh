@@ -3,18 +3,18 @@
 # install.sh - Install clamp from GitHub Releases.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/brunos3d/claude-move-project/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/wsagency/claude-move-project/main/install.sh | bash
 #
 # Environment variables:
 #   CLAMP_VERSION  Version to install without the leading v (default: latest)
 #   CLAMP_BIN_DIR  Install directory (default: /usr/local/bin if writable,
 #                  otherwise ~/.local/bin)
 #   CLAMP_REPO     GitHub owner/repo to download from
-#                  (default: brunos3d/claude-move-project)
+#                  (default: wsagency/claude-move-project)
 
 set -euo pipefail
 
-REPO="${CLAMP_REPO:-brunos3d/claude-move-project}"
+REPO="${CLAMP_REPO:-wsagency/claude-move-project}"
 VERSION="${CLAMP_VERSION:-latest}"
 
 if [[ "$VERSION" == "latest" ]]; then

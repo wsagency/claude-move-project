@@ -17,7 +17,7 @@
 
 set -euo pipefail
 
-REPO_SLUG="${CLAMP_REPO:-brunos3d/claude-move-project}"
+REPO_SLUG="${CLAMP_REPO:-wsagency/claude-move-project}"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="$ROOT_DIR/dist"
 
@@ -79,7 +79,7 @@ Section: utils
 Priority: optional
 Architecture: all
 Depends: bash
-Maintainer: Bruno Silva <bruno3dcontato@gmail.com>
+Maintainer: Kristijan Lukačin <kristijan@gmail.com>
 Homepage: https://github.com/$REPO_SLUG
 Description: Move Claude Code projects while preserving session history
  clamp moves, fixes, lists, verifies, prunes and packs Claude Code
